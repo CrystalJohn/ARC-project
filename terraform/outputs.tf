@@ -27,10 +27,11 @@ output "ec2_private_ip" {
   value       = module.ec2.private_ip
 }
 
-output "alb_dns_name" {
-  description = "DNS name of the Application Load Balancer"
-  value       = module.ec2.alb_dns_name
-}
+# ALB output - commented out until AWS enables ELB service
+# output "alb_dns_name" {
+#   description = "DNS name of the Application Load Balancer"
+#   value       = module.ec2.alb_dns_name
+# }
 
 # S3 Outputs
 output "documents_bucket_name" {
@@ -71,15 +72,16 @@ output "cognito_user_pool_arn" {
 }
 
 # Amplify Outputs
-output "amplify_app_id" {
-  description = "ID of the Amplify app"
-  value       = module.amplify.app_id
-}
+# Amplify outputs - commented out until module is enabled
+# output "amplify_app_id" {
+#   description = "ID of the Amplify app"
+#   value       = module.amplify.app_id
+# }
 
-output "amplify_default_domain" {
-  description = "Default domain of the Amplify app"
-  value       = module.amplify.default_domain
-}
+# output "amplify_default_domain" {
+#   description = "Default domain of the Amplify app"
+#   value       = module.amplify.default_domain
+# }
 
 # IAM Outputs
 output "ec2_role_arn" {

@@ -17,8 +17,8 @@ resource "aws_cognito_user_pool" "main" {
     require_symbols   = false
   }
 
-  # MFA configuration
-  mfa_configuration = "OPTIONAL"
+  # MFA configuration - OFF for simplicity (can enable later)
+  mfa_configuration = "OFF"
 
   # Email configuration
   email_configuration {

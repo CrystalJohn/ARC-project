@@ -63,10 +63,11 @@ module "dynamodb" {
 module "ec2" {
   source = "./modules/ec2"
   
-  project_name        = var.project_name
-  environment         = var.environment
-  vpc_id              = module.vpc.vpc_id
-  private_subnet_id   = module.vpc.private_subnet_id
+  project_name          = var.project_name
+  environment           = var.environment
+  vpc_id                = module.vpc.vpc_id
+  public_subnet_ids     = [module.vpc.public_subnet_id, module.vpc.public_subnet_2_id]
+  private_subnet_id     = module.vpc.private_subnet_id
   instance_profile_name = module.iam.ec2_instance_profile_name
 }
 
@@ -79,12 +80,14 @@ module "cognito" {
 }
 
 # Amplify Module
-module "amplify" {
-  source = "./modules/amplify"
-  
-  project_name       = var.project_name
-  environment        = var.environment
-  cognito_pool_id    = module.cognito.user_pool_id
-  cognito_client_id  = module.cognito.app_client_id
-  api_url            = module.ec2.alb_dns_name
-}
+# TODO: Uncomment after setting up Git repository
+# module "amplify" {
+#   source = "./modules/amplify"
+#   
+#   project_name       = var.project_name
+#   environment        = var.environment
+#   repository_url     = "https://gitlab.com/academy-research-chatbot-arc/ARC-project.git"
+#   cognito_pool_id    = module.cognito.user_pool_id
+#   cognito_client_id  = module.cognito.app_client_id
+#   api_url            = module.ec2.alb_dns_name
+# }

@@ -9,6 +9,8 @@ quick-check.ps1
 vpc-commands.txt
 git-setup.ps1
 git-setup.sh
+setup-terraform-backend.ps1
+setup-terraform-backend.sh
 COMMIT_RULES.md
 CONTRIBUTING.md
 GIT_PUSH_GUIDE.md

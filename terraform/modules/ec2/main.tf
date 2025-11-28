@@ -31,18 +31,6 @@ resource "aws_security_group" "ec2" {
     description = "SSH access"
   }
 
-  # FastAPI from ALB
-  ingress {
-    from_port       = 8000
-    to_port         = 8000
-    protocol        = "tcp"
-    security_groups = [aws_security_group.alb.id]
-    description     = "FastAPI from ALB"
-  }
-
-  # Qdrant (localhost only - no external access)
-  # Port 6333 is not exposed externally
-
   # Outbound HTTPS for AWS services
   egress {
     from_port   = 443
@@ -64,6 +52,17 @@ resource "aws_security_group" "ec2" {
   tags = {
     Name = "${var.project_name}-${var.environment}-ec2-sg"
   }
+}
+
+# Security Group Rule: EC2 ingress from ALB (separate to avoid cycle)
+resource "aws_security_group_rule" "ec2_from_alb" {
+  type                     = "ingress"
+  from_port                = 8000
+  to_port                  = 8000
+  protocol                 = "tcp"
+  source_security_group_id = aws_security_group.alb.id
+  security_group_id        = aws_security_group.ec2.id
+  description              = "FastAPI from ALB"
 }
 
 # EC2 Instance
@@ -111,70 +110,73 @@ resource "aws_security_group" "alb" {
     description = "HTTPS from internet"
   }
 
-  # Outbound to EC2
-  egress {
-    from_port       = 8000
-    to_port         = 8000
-    protocol        = "tcp"
-    security_groups = [aws_security_group.ec2.id]
-    description     = "To EC2 FastAPI"
-  }
-
   tags = {
     Name = "${var.project_name}-${var.environment}-alb-sg"
   }
 }
 
-# Application Load Balancer
-resource "aws_lb" "main" {
-  name               = "${var.project_name}-${var.environment}-alb"
-  internal           = false
-  load_balancer_type = "application"
-  security_groups    = [aws_security_group.alb.id]
-  subnets            = [var.public_subnet_id, var.private_subnet_id]  # ALB needs at least 2 subnets
-
-  tags = {
-    Name = "${var.project_name}-${var.environment}-alb"
-  }
+# Security Group Rule: ALB egress to EC2 (separate to avoid cycle)
+resource "aws_security_group_rule" "alb_to_ec2" {
+  type                     = "egress"
+  from_port                = 8000
+  to_port                  = 8000
+  protocol                 = "tcp"
+  source_security_group_id = aws_security_group.ec2.id
+  security_group_id        = aws_security_group.alb.id
+  description              = "To EC2 FastAPI"
 }
 
-# Target Group
-resource "aws_lb_target_group" "app" {
-  name     = "${var.project_name}-${var.environment}-tg"
-  port     = 8000
-  protocol = "HTTP"
-  vpc_id   = var.vpc_id
-
-  health_check {
-    enabled             = true
-    healthy_threshold   = 2
-    unhealthy_threshold = 2
-    timeout             = 5
-    interval            = 30
-    path                = "/health"
-    matcher             = "200"
-  }
-
-  tags = {
-    Name = "${var.project_name}-${var.environment}-target-group"
-  }
-}
-
-# Target Group Attachment
-resource "aws_lb_target_group_attachment" "app" {
-  target_group_arn = aws_lb_target_group.app.arn
-  target_id        = aws_instance.app.id
-  port             = 8000
-}
-
-# ALB Listener
-resource "aws_lb_listener" "http" {
-  load_balancer_arn = aws_lb.main.arn
-  port              = 80
-  protocol          = "HTTP"
-
-  default_action {
-    type             = "forward"
-    target_group_arn = aws_lb_target_group.app.arn
-  }
-}
+# Application Load Balancer - COMMENTED OUT due to AWS account restriction
+# Uncomment after AWS Support enables ELB service
+# resource "aws_lb" "main" {
+#   name               = "${var.project_name}-${var.environment}-alb"
+#   internal           = false
+#   load_balancer_type = "application"
+#   security_groups    = [aws_security_group.alb.id]
+#   subnets            = var.public_subnet_ids  # ALB needs at least 2 subnets in different AZs
+#
+#   tags = {
+#     Name = "${var.project_name}-${var.environment}-alb"
+#   }
+# }
+#
+# # Target Group
+# resource "aws_lb_target_group" "app" {
+#   name     = "${var.project_name}-${var.environment}-tg"
+#   port     = 8000
+#   protocol = "HTTP"
+#   vpc_id   = var.vpc_id
+#
+#   health_check {
+#     enabled             = true
+#     healthy_threshold   = 2
+#     unhealthy_threshold = 2
+#     timeout             = 5
+#     interval            = 30
+#     path                = "/health"
+#     matcher             = "200"
+#   }
+#
+#   tags = {
+#     Name = "${var.project_name}-${var.environment}-target-group"
+#   }
+# }
+#
+# # Target Group Attachment
+# resource "aws_lb_target_group_attachment" "app" {
+#   target_group_arn = aws_lb_target_group.app.arn
+#   target_id        = aws_instance.app.id
+#   port             = 8000
+# }
+#
+# # ALB Listener
+# resource "aws_lb_listener" "http" {
+#   load_balancer_arn = aws_lb.main.arn
+#   port              = 80
+#   protocol          = "HTTP"
+#
+#   default_action {
+#     type             = "forward"
+#     target_group_arn = aws_lb_target_group.app.arn
+#   }
+# }

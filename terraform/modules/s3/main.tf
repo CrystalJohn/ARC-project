@@ -49,6 +49,8 @@ resource "aws_s3_bucket_lifecycle_configuration" "documents" {
     id     = "transition-to-ia"
     status = "Enabled"
 
+    filter {}  # Apply to all objects
+
     transition {
       days          = 90
       storage_class = "STANDARD_IA"
@@ -58,6 +60,8 @@ resource "aws_s3_bucket_lifecycle_configuration" "documents" {
   rule {
     id     = "delete-incomplete-multipart"
     status = "Enabled"
+
+    filter {}  # Apply to all objects
 
     abort_incomplete_multipart_upload {
       days_after_initiation = 7
