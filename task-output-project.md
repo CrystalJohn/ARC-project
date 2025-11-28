@@ -9,7 +9,14 @@
 
 **Task #1:** Setup AWS Account, IAM Users & Policies - **DevOps** → Kết quả: IAM users, roles, policies cho tất cả services (EC2, S3, DynamoDB, Bedrock, Textract, Amplify)
 
-**Task #2:** Create VPC, Subnets, IGW, NAT Gateway - **DevOps** → Kết quả: VPC ID, Public/Private Subnet IDs, routing tables hoạt động
+**Task #2:** Create VPC, Subnets, IGW, NAT Gateway - **DevOps** → ✅ **COMPLETED** (28/11/2025)
+- VPC: `vpc-0138ae8125dd37b5e` (10.0.0.0/16)
+- Public Subnet: `subnet-0108e3512307a2c1c` (10.0.1.0/24, ap-southeast-1a)
+- Private Subnet: `subnet-075db3845c9d2c637` (10.0.2.0/24, ap-southeast-1a)
+- Internet Gateway: `igw-02456b75b1d3c65b3`
+- NAT Gateway: `nat-00dcc17d0656e68aa` (Public IP: 54.179.37.74)
+- Route Tables: Public RT (rtb-068ca934175371fd0), Private RT (rtb-044a72b53a2009844)
+- All routing tables configured and working correctly
 
 **Task #3:** Setup Terraform project structure - **DevOps & Tech Lead** → Kết quả: Terraform folder structure, modules cơ bản, state backend (S3)
 

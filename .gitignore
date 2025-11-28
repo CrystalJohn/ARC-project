@@ -1,6 +1,22 @@
 # Kiro
 .kiro/
 
+# Helper scripts and documentation (local only)
+check-vpc.ps1
+check-aws-resources.ps1
+check-aws-resources.sh
+quick-check.ps1
+vpc-commands.txt
+git-setup.ps1
+git-setup.sh
+COMMIT_RULES.md
+CONTRIBUTING.md
+GIT_PUSH_GUIDE.md
+
+# Project knowledge files (local only)
+knowledge-project.md
+task-output-project.md
+
 # Terraform
 .terraform/
 .terraform.lock.hcl
