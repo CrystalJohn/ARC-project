@@ -93,8 +93,9 @@ resource "aws_iam_role_policy" "ec2_bedrock_policy" {
           "bedrock:InvokeModelWithResponseStream"
         ]
         Resource = [
-          "arn:aws:bedrock:*::foundation-model/anthropic.claude-3-5-sonnet-20240620-v1:0",
-          "arn:aws:bedrock:*::foundation-model/amazon.titan-embed-text-v2:0"
+          "arn:aws:bedrock:*::foundation-model/anthropic.claude-*",
+          "arn:aws:bedrock:*::foundation-model/amazon.titan-*",
+          "arn:aws:bedrock:*::foundation-model/amazon.nova-*"
         ]
       }
     ]
@@ -268,4 +269,25 @@ resource "aws_iam_user_policy" "frontend_policy" {
 resource "aws_iam_user_policy_attachment" "devops_admin" {
   user       = aws_iam_user.devops.name
   policy_arn = "arn:aws:iam::aws:policy/AdministratorAccess"
+}
+
+# Console Login Profiles (passwords for AWS Console access)
+resource "aws_iam_user_login_profile" "tech_lead_login" {
+  user                    = aws_iam_user.tech_lead.name
+  password_reset_required = true
+}
+
+resource "aws_iam_user_login_profile" "backend_idp_login" {
+  user                    = aws_iam_user.backend_idp.name
+  password_reset_required = true
+}
+
+resource "aws_iam_user_login_profile" "frontend_login" {
+  user                    = aws_iam_user.frontend.name
+  password_reset_required = true
+}
+
+resource "aws_iam_user_login_profile" "devops_login" {
+  user                    = aws_iam_user.devops.name
+  password_reset_required = true
 }

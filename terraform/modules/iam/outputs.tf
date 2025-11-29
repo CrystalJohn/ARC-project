@@ -68,3 +68,28 @@ output "devops_secret_access_key" {
   value       = aws_iam_access_key.devops_key.secret
   sensitive   = true
 }
+
+# Console Login Passwords (sensitive)
+output "tech_lead_password" {
+  description = "Initial console password for tech lead user"
+  value       = aws_iam_user_login_profile.tech_lead_login.password
+  sensitive   = true
+}
+
+output "backend_idp_password" {
+  description = "Initial console password for backend+IDP user"
+  value       = aws_iam_user_login_profile.backend_idp_login.password
+  sensitive   = true
+}
+
+output "frontend_password" {
+  description = "Initial console password for frontend user"
+  value       = aws_iam_user_login_profile.frontend_login.password
+  sensitive   = true
+}
+
+output "devops_password" {
+  description = "Initial console password for devops user"
+  value       = aws_iam_user_login_profile.devops_login.password
+  sensitive   = true
+}
