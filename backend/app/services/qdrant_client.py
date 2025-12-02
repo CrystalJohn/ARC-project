@@ -257,10 +257,10 @@ class QdrantVectorStore:
                 ]
             )
         
-        # Search
-        results = self.client.search(
+        # Search using query_points (qdrant-client >= 1.7)
+        results = self.client.query_points(
             collection_name=self.COLLECTION_NAME,
-            query_vector=query_vector,
+            query=query_vector,
             query_filter=query_filter,
             limit=top_k,
             score_threshold=score_threshold,
@@ -269,7 +269,7 @@ class QdrantVectorStore:
         
         # Convert to SearchResult
         search_results = []
-        for hit in results:
+        for hit in results.points:
             payload = hit.payload or {}
             search_results.append(
                 SearchResult(

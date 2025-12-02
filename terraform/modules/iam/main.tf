@@ -95,7 +95,8 @@ resource "aws_iam_role_policy" "ec2_bedrock_policy" {
         Resource = [
           "arn:aws:bedrock:*::foundation-model/anthropic.claude-*",
           "arn:aws:bedrock:*::foundation-model/amazon.titan-*",
-          "arn:aws:bedrock:*::foundation-model/amazon.nova-*"
+          "arn:aws:bedrock:*::foundation-model/amazon.nova-*",
+          "arn:aws:bedrock:*::foundation-model/cohere.embed-*"
         ]
       }
     ]
@@ -211,7 +212,13 @@ resource "aws_iam_user_policy" "tech_lead_policy" {
           "bedrock:*",
           "textract:*",
           "sqs:*",
-          "cloudwatch:*"
+          "cloudwatch:*",
+          "ssm:StartSession",
+          "ssm:TerminateSession",
+          "ssm:ResumeSession",
+          "ssm:DescribeSessions",
+          "ssm:GetConnectionStatus",
+          "ssm:DescribeInstanceInformation"
         ]
         Resource = "*"
       }
