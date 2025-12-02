@@ -1,15 +1,35 @@
 """
 Run SQS Worker for IDP Pipeline
 
-Usage: python run_worker.py
+Usage: python run_worker.py [max_iterations]
+
+Full pipeline:
+1. Receive SQS message
+2. Download PDF from S3
+3. Extract text (PyPDF2 for digital, skip scanned)
+4. Chunk text
+5. Generate embeddings (Cohere via Bedrock)
+6. Store vectors in Qdrant
+7. Update status in DynamoDB
 """
 import os
 import sys
+import logging
 
 # Set default region
 os.environ.setdefault("AWS_REGION", "ap-southeast-1")
 
 from app.services.sqs_worker import SQSWorker
+from app.services.embedding_service import CohereEmbeddingService
+from app.services.qdrant_client import QdrantVectorStore
+from app.services.document_status_manager import DocumentStatusManager, DocumentStatus
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 # Configuration
 QUEUE_URL = os.getenv(
@@ -18,23 +38,104 @@ QUEUE_URL = os.getenv(
 )
 BUCKET = os.getenv("S3_BUCKET", "arc-chatbot-documents-427995028618")
 REGION = os.getenv("AWS_REGION", "ap-southeast-1")
+QDRANT_HOST = os.getenv("QDRANT_HOST", "localhost")
+QDRANT_PORT = int(os.getenv("QDRANT_PORT", "6333"))
+
+
+def create_callbacks():
+    """Create callback functions for the worker."""
+    
+    # Initialize services
+    embedding_service = CohereEmbeddingService(region=REGION)
+    qdrant_store = QdrantVectorStore(host=QDRANT_HOST, port=QDRANT_PORT)
+    status_manager = DocumentStatusManager(region_name=REGION)
+    
+    # Ensure Qdrant collection exists
+    qdrant_store.ensure_collection()
+    
+    def embeddings_callback(text: str):
+        """Generate embedding for text."""
+        return embedding_service.embed_text(text)
+    
+    def store_vectors_callback(doc_id: str, chunks: list, vectors: list, metadata: dict):
+        """Store vectors in Qdrant."""
+        # Filter out None vectors
+        valid_data = [(c, v) for c, v in zip(chunks, vectors) if v is not None]
+        if not valid_data:
+            logger.warning(f"No valid vectors to store for {doc_id}")
+            return False
+        
+        valid_chunks, valid_vectors = zip(*valid_data)
+        
+        try:
+            count = qdrant_store.upsert_vectors(
+                doc_id=doc_id,
+                texts=list(valid_chunks),
+                vectors=list(valid_vectors)
+            )
+            logger.info(f"Stored {count} vectors for {doc_id}")
+            return True
+        except Exception as e:
+            logger.error(f"Error storing vectors: {e}")
+            return False
+    
+    def update_status_callback(doc_id: str, status: str, metadata: dict):
+        """Update document status in DynamoDB."""
+        try:
+            # Map worker status to DocumentStatus enum
+            status_map = {
+                "processing": DocumentStatus.IDP_RUNNING,
+                "completed": DocumentStatus.EMBEDDING_DONE,
+                "failed": DocumentStatus.FAILED,
+                "skipped": DocumentStatus.FAILED  # Scanned PDFs without Textract
+            }
+            db_status = status_map.get(status, DocumentStatus.FAILED)
+            
+            status_manager.update_status(
+                doc_id=doc_id,
+                new_status=db_status,
+                chunk_count=metadata.get("chunks_count"),
+                error_message=metadata.get("error_message")
+            )
+            logger.info(f"Updated status for {doc_id}: {db_status.value}")
+            return True
+        except Exception as e:
+            logger.error(f"Error updating status: {e}")
+            return False
+    
+    return embeddings_callback, store_vectors_callback, update_status_callback
 
 
 def main():
-    print(f"Starting SQS Worker...")
+    print("=" * 60)
+    print("IDP Pipeline - SQS Worker")
+    print("=" * 60)
     print(f"Queue URL: {QUEUE_URL}")
     print(f"Bucket: {BUCKET}")
     print(f"Region: {REGION}")
-    print("-" * 50)
+    print(f"Qdrant: {QDRANT_HOST}:{QDRANT_PORT}")
+    print("-" * 60)
     
+    # Create callbacks
+    embeddings_cb, store_cb, status_cb = create_callbacks()
+    
+    # Initialize worker with callbacks
     worker = SQSWorker(
         queue_url=QUEUE_URL,
         documents_bucket=BUCKET,
-        region=REGION
+        region=REGION,
+        embeddings_callback=embeddings_cb,
+        store_vectors_callback=store_cb,
+        update_status_callback=status_cb
     )
     
-    # Process messages (max 10 iterations for testing, None for infinite)
+    # Process messages (max iterations from CLI arg, None for infinite)
     max_iter = int(sys.argv[1]) if len(sys.argv) > 1 else None
+    if max_iter:
+        print(f"Processing up to {max_iter} iterations...")
+    else:
+        print("Processing indefinitely (Ctrl+C to stop)...")
+    
     worker.start(max_iterations=max_iter)
 
 
