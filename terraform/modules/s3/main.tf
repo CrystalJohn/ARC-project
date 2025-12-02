@@ -96,3 +96,19 @@ resource "aws_s3_bucket_policy" "documents" {
     ]
   })
 }
+
+# S3 Event Notification to SQS
+# Triggers when PDF files are uploaded to uploads/ prefix
+resource "aws_s3_bucket_notification" "document_upload" {
+  bucket = aws_s3_bucket.documents.id
+
+  queue {
+    queue_arn     = var.sqs_queue_arn
+    events        = ["s3:ObjectCreated:*"]
+    filter_prefix = "uploads/"
+    filter_suffix = ".pdf"
+  }
+
+  # Ensure SQS queue policy is created first
+  depends_on = [var.sqs_queue_arn]
+}

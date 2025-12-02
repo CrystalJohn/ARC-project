@@ -14,3 +14,8 @@ variable "ec2_role_arn" {
   description = "ARN of the EC2 IAM role for bucket policy"
   type        = string
 }
+
+variable "sqs_queue_arn" {
+  description = "ARN of the SQS queue for S3 event notifications"
+  type        = string
+}
