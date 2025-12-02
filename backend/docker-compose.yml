@@ -1,0 +1,42 @@
+# Docker Compose for ARC Chatbot Backend Services
+# Task #19: Setup Qdrant vector database on EC2
+
+version: '3.8'
+
+services:
+  # Qdrant Vector Database
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: arc-qdrant
+    ports:
+      - "6333:6333"   # REST API
+      - "6334:6334"   # gRPC API
+    volumes:
+      - qdrant_storage:/qdrant/storage
+    environment:
+      - QDRANT__SERVICE__GRPC_PORT=6334
+      - QDRANT__LOG_LEVEL=INFO
+    restart: always
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6333/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # FastAPI Backend (optional - can run separately)
+  # fastapi:
+  #   build: .
+  #   container_name: arc-fastapi
+  #   ports:
+  #     - "8000:8000"
+  #   environment:
+  #     - QDRANT_HOST=qdrant
+  #     - QDRANT_PORT=6333
+  #   depends_on:
+  #     - qdrant
+  #   restart: always
+
+volumes:
+  qdrant_storage:
+    driver: local
