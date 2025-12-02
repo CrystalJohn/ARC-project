@@ -88,3 +88,19 @@ output "ec2_role_arn" {
   description = "ARN of the EC2 IAM role"
   value       = module.iam.ec2_role_arn
 }
+
+# SQS Outputs
+output "sqs_queue_url" {
+  description = "URL of the document processing SQS queue"
+  value       = module.sqs.queue_url
+}
+
+output "sqs_queue_arn" {
+  description = "ARN of the document processing SQS queue"
+  value       = module.sqs.queue_arn
+}
+
+output "sqs_dlq_url" {
+  description = "URL of the dead letter queue"
+  value       = module.sqs.dlq_url
+}

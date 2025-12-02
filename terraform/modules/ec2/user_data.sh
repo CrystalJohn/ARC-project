@@ -4,6 +4,11 @@
 # Update system
 yum update -y
 
+# Install and start SSM Agent (for Session Manager)
+yum install -y amazon-ssm-agent
+systemctl enable amazon-ssm-agent
+systemctl start amazon-ssm-agent
+
 # Install Docker
 yum install -y docker
 

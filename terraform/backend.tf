@@ -3,7 +3,7 @@
 
 terraform {
   backend "s3" {
-    bucket         = "arc-chatbot-terraform-state" // Tên S3 bucket
+    bucket         = "arc-chatbot-terraform-state-427995028618" // Tên S3 bucket
     key            = "infrastructure/terraform.tfstate" // Path trong table
     region         = "ap-southeast-1" 
     dynamodb_table = "terraform-locks" //table name cho locking

@@ -79,6 +79,15 @@ module "cognito" {
   environment  = var.environment
 }
 
+# SQS Module - Document Processing Queue
+module "sqs" {
+  source = "./modules/sqs"
+  
+  project_name  = var.project_name
+  environment   = var.environment
+  s3_bucket_arn = module.s3.documents_bucket_arn
+}
+
 # Amplify Module
 # TODO: Uncomment after setting up Git repository
 # module "amplify" {
