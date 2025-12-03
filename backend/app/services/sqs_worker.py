@@ -16,7 +16,7 @@ import boto3
 from botocore.exceptions import ClientError
 
 from .pdf_detector import detect_pdf_type, PDFType
-from .pdf_extractor import extract_text_from_pdf
+from .pdf_extractor import extract_text_from_pdf, extract_pdf_auto, TextractExtractor
 from .text_chunker import chunk_text, TextChunk
 
 # Configure logging
@@ -273,16 +273,6 @@ class SQSWorker:
             pdf_type = detect_pdf_type(pdf_bytes)
             logger.info(f"PDF type detected: {pdf_type}")
             
-            if pdf_type == PDFType.SCANNED:
-                # Skip scanned PDFs for now (Textract not available)
-                return ProcessingResult(
-                    document_id=document_id,
-                    status=ProcessingStatus.SKIPPED,
-                    chunks_count=0,
-                    total_chars=0,
-                    error_message="Scanned PDF - Textract not available"
-                )
-            
             if pdf_type == PDFType.UNKNOWN:
                 return ProcessingResult(
                     document_id=document_id,
@@ -292,9 +282,14 @@ class SQSWorker:
                     error_message="Unknown PDF type - cannot process"
                 )
             
-            # 3. Extract text
+            # 3. Extract text (auto-detect: PyPDF2 for digital, Textract for scanned)
             logger.info("Extracting text from PDF...")
-            pdf_content = extract_text_from_pdf(pdf_bytes)
+            pdf_content = extract_pdf_auto(
+                pdf_bytes, 
+                use_textract_for_scanned=True,
+                textract_region=self.region
+            )
+            logger.info(f"Extraction method: {pdf_content.extraction_method}")
             
             if not pdf_content.full_text:
                 return ProcessingResult(

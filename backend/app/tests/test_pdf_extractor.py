@@ -262,3 +262,252 @@ class TestMetadataExtraction:
             
             assert result.metadata.get("title") == "Test Document"
             assert result.metadata.get("author") == "Test Author"
+
+
+# ============ TEXTRACT EXTRACTOR TESTS (Task #16) ============
+
+from app.services.pdf_extractor import TextractExtractor, extract_pdf_auto
+
+
+class TestTextractExtractor:
+    """Tests for TextractExtractor class."""
+    
+    def test_init(self):
+        """Test initialization."""
+        with patch('boto3.client') as mock_boto:
+            extractor = TextractExtractor(region="ap-southeast-1")
+            mock_boto.assert_called_with("textract", region_name="ap-southeast-1")
+            assert extractor.region == "ap-southeast-1"
+    
+    def test_extract_from_bytes_detect_text(self):
+        """Test sync text detection from bytes."""
+        mock_response = {
+            "Blocks": [
+                {"BlockType": "PAGE", "Id": "page1", "Page": 1},
+                {"BlockType": "LINE", "Id": "line1", "Text": "Hello World", "Page": 1},
+                {"BlockType": "LINE", "Id": "line2", "Text": "Second line", "Page": 1}
+            ]
+        }
+        
+        with patch('boto3.client') as mock_boto:
+            mock_client = Mock()
+            mock_client.detect_document_text.return_value = mock_response
+            mock_boto.return_value = mock_client
+            
+            extractor = TextractExtractor()
+            result = extractor.extract_from_bytes(b"fake pdf", extract_tables=False)
+            
+            assert result.extraction_method == "textract"
+            assert result.total_pages == 1
+            assert "Hello World" in result.full_text
+            assert "Second line" in result.full_text
+    
+    def test_extract_from_bytes_analyze_document(self):
+        """Test sync document analysis with tables."""
+        mock_response = {
+            "Blocks": [
+                {"BlockType": "PAGE", "Id": "page1", "Page": 1},
+                {"BlockType": "LINE", "Id": "line1", "Text": "Document text", "Page": 1},
+                {
+                    "BlockType": "TABLE", "Id": "table1", "Page": 1,
+                    "Relationships": [{"Type": "CHILD", "Ids": ["cell1", "cell2"]}]
+                },
+                {
+                    "BlockType": "CELL", "Id": "cell1", "RowIndex": 1, "ColumnIndex": 1,
+                    "Relationships": [{"Type": "CHILD", "Ids": ["word1"]}]
+                },
+                {
+                    "BlockType": "CELL", "Id": "cell2", "RowIndex": 1, "ColumnIndex": 2,
+                    "Relationships": [{"Type": "CHILD", "Ids": ["word2"]}]
+                },
+                {"BlockType": "WORD", "Id": "word1", "Text": "Cell1"},
+                {"BlockType": "WORD", "Id": "word2", "Text": "Cell2"}
+            ]
+        }
+        
+        with patch('boto3.client') as mock_boto:
+            mock_client = Mock()
+            mock_client.analyze_document.return_value = mock_response
+            mock_boto.return_value = mock_client
+            
+            extractor = TextractExtractor()
+            result = extractor.extract_from_bytes(b"fake pdf", extract_tables=True)
+            
+            assert result.extraction_method == "textract"
+            assert "Document text" in result.full_text
+            assert len(result.pages) == 1
+            assert len(result.pages[0].tables) == 1
+            assert result.pages[0].tables[0][0] == ["Cell1", "Cell2"]
+    
+    def test_extract_from_bytes_error(self):
+        """Test error handling."""
+        from botocore.exceptions import ClientError
+        
+        with patch('boto3.client') as mock_boto:
+            mock_client = Mock()
+            mock_client.detect_document_text.side_effect = ClientError(
+                {"Error": {"Code": "InvalidParameterException", "Message": "Invalid"}},
+                "DetectDocumentText"
+            )
+            mock_boto.return_value = mock_client
+            
+            extractor = TextractExtractor()
+            result = extractor.extract_from_bytes(b"fake pdf", extract_tables=False)
+            
+            assert len(result.errors) > 0
+            assert "InvalidParameterException" in result.errors[0]
+    
+    def test_extract_multipage(self):
+        """Test multi-page extraction."""
+        mock_response = {
+            "Blocks": [
+                {"BlockType": "LINE", "Id": "line1", "Text": "Page 1 text", "Page": 1},
+                {"BlockType": "LINE", "Id": "line2", "Text": "Page 2 text", "Page": 2},
+                {"BlockType": "LINE", "Id": "line3", "Text": "Page 3 text", "Page": 3}
+            ]
+        }
+        
+        with patch('boto3.client') as mock_boto:
+            mock_client = Mock()
+            mock_client.detect_document_text.return_value = mock_response
+            mock_boto.return_value = mock_client
+            
+            extractor = TextractExtractor()
+            result = extractor.extract_from_bytes(b"fake pdf", extract_tables=False)
+            
+            assert result.total_pages == 3
+            assert len(result.pages) == 3
+            assert result.pages[0].page_number == 1
+            assert result.pages[1].page_number == 2
+            assert result.pages[2].page_number == 3
+
+
+class TestExtractFromS3:
+    """Tests for S3 extraction with async API."""
+    
+    def test_start_async_job(self):
+        """Test starting async job."""
+        with patch('boto3.client') as mock_boto:
+            mock_client = Mock()
+            mock_client.start_document_analysis.return_value = {"JobId": "job123"}
+            mock_boto.return_value = mock_client
+            
+            extractor = TextractExtractor()
+            result = extractor.extract_from_s3(
+                "test-bucket", "test.pdf",
+                wait_for_completion=False
+            )
+            
+            assert result.metadata.get("job_id") == "job123"
+            assert result.metadata.get("status") == "IN_PROGRESS"
+    
+    def test_wait_for_completion_success(self):
+        """Test waiting for job completion."""
+        mock_response = {
+            "JobStatus": "SUCCEEDED",
+            "Blocks": [
+                {"BlockType": "LINE", "Id": "line1", "Text": "Extracted text", "Page": 1}
+            ]
+        }
+        
+        with patch('boto3.client') as mock_boto:
+            mock_client = Mock()
+            mock_client.start_document_analysis.return_value = {"JobId": "job123"}
+            mock_client.get_document_analysis.return_value = mock_response
+            mock_boto.return_value = mock_client
+            
+            extractor = TextractExtractor()
+            result = extractor.extract_from_s3(
+                "test-bucket", "test.pdf",
+                wait_for_completion=True,
+                poll_interval=0.1
+            )
+            
+            assert "Extracted text" in result.full_text
+            assert len(result.errors) == 0
+    
+    def test_wait_for_completion_failed(self):
+        """Test job failure handling."""
+        mock_response = {
+            "JobStatus": "FAILED",
+            "StatusMessage": "Document processing failed"
+        }
+        
+        with patch('boto3.client') as mock_boto:
+            mock_client = Mock()
+            mock_client.start_document_analysis.return_value = {"JobId": "job123"}
+            mock_client.get_document_analysis.return_value = mock_response
+            mock_boto.return_value = mock_client
+            
+            extractor = TextractExtractor()
+            result = extractor.extract_from_s3(
+                "test-bucket", "test.pdf",
+                wait_for_completion=True,
+                poll_interval=0.1
+            )
+            
+            assert len(result.errors) > 0
+            assert "failed" in result.errors[0].lower()
+
+
+class TestExtractPdfAuto:
+    """Tests for auto PDF extraction."""
+    
+    def test_digital_pdf_uses_pypdf2(self):
+        """Digital PDF should use PyPDF2."""
+        mock_page = Mock()
+        mock_page.extract_text.return_value = "A" * 100  # 100 chars per page
+        
+        mock_reader = Mock()
+        mock_reader.pages = [mock_page]
+        mock_reader.metadata = None
+        
+        with patch('app.services.pdf_extractor._get_pdf_reader', return_value=mock_reader):
+            result = extract_pdf_auto("test.pdf", use_textract_for_scanned=True)
+            
+            assert result.extraction_method == "pypdf2"
+    
+    def test_scanned_pdf_uses_textract(self):
+        """Scanned PDF (low text) should use Textract."""
+        # PyPDF2 returns very little text
+        mock_page = Mock()
+        mock_page.extract_text.return_value = "A" * 10  # Only 10 chars
+        
+        mock_reader = Mock()
+        mock_reader.pages = [mock_page]
+        mock_reader.metadata = None
+        
+        # Textract response
+        textract_response = {
+            "Blocks": [
+                {"BlockType": "LINE", "Id": "line1", "Text": "Scanned text", "Page": 1}
+            ]
+        }
+        
+        # Use bytes input to avoid file open
+        pdf_bytes = b"fake pdf content"
+        
+        with patch('app.services.pdf_extractor._get_pdf_reader', return_value=mock_reader):
+            with patch('boto3.client') as mock_boto:
+                mock_client = Mock()
+                mock_client.analyze_document.return_value = textract_response
+                mock_boto.return_value = mock_client
+                
+                result = extract_pdf_auto(pdf_bytes, use_textract_for_scanned=True)
+                
+                assert result.extraction_method == "textract"
+                assert "Scanned text" in result.full_text
+    
+    def test_scanned_pdf_without_textract(self):
+        """Scanned PDF without Textract fallback."""
+        mock_page = Mock()
+        mock_page.extract_text.return_value = "A" * 10
+        
+        mock_reader = Mock()
+        mock_reader.pages = [mock_page]
+        mock_reader.metadata = None
+        
+        with patch('app.services.pdf_extractor._get_pdf_reader', return_value=mock_reader):
+            result = extract_pdf_auto("test.pdf", use_textract_for_scanned=False)
+            
+            assert result.extraction_method == "pypdf2"

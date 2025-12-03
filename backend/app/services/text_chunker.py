@@ -22,8 +22,9 @@ class TextChunk:
 
 
 # Default settings
-DEFAULT_CHUNK_SIZE = 1000      # tokens
-DEFAULT_OVERLAP = 200          # tokens
+# Cohere embed model has 2048 char limit, so chunk_size * CHARS_PER_TOKEN < 2048
+DEFAULT_CHUNK_SIZE = 400       # tokens (~1600 chars, safe for Cohere 2048 limit)
+DEFAULT_OVERLAP = 50           # tokens
 CHARS_PER_TOKEN = 4            # Ước tính trung bình
 
 

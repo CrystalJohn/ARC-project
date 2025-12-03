@@ -42,14 +42,14 @@ class QdrantVectorStore:
     Qdrant vector store for document embeddings.
     
     Requirements:
-    - 6.1: Collection with 1024-dim vectors and cosine similarity
+    - 6.1: Collection with 1536-dim vectors (Titan) and cosine similarity
     - 6.2: Payload indexing for doc_id, page, is_table
     - 6.3: Persist vectors to disk
     - 6.4: Recover vectors after restart
     """
     
     COLLECTION_NAME = "documents"
-    VECTOR_SIZE = 1024
+    VECTOR_SIZE = 1024  # Cohere Embed English v3 output size
     
     def __init__(
         self,

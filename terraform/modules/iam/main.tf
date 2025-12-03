@@ -241,8 +241,17 @@ resource "aws_iam_user_policy" "backend_idp_policy" {
           "s3:*",
           "dynamodb:*",
           "bedrock:InvokeModel",
+          "bedrock:InvokeModelWithResponseStream",
           "textract:*",
           "sqs:*"
+        ]
+        Resource = "*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "aws-marketplace:Subscribe",
+          "aws-marketplace:ViewSubscriptions"
         ]
         Resource = "*"
       }

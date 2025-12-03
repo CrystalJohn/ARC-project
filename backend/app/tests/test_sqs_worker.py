@@ -157,8 +157,9 @@ class TestProcessDocument:
                 mock_content.total_chars = 2400
                 mock_content.total_pages = 5
                 mock_content.metadata = {}
+                mock_content.extraction_method = "pypdf2"
                 
-                with patch('app.services.sqs_worker.extract_text_from_pdf', return_value=mock_content):
+                with patch('app.services.sqs_worker.extract_pdf_auto', return_value=mock_content):
                     with patch('app.services.sqs_worker.chunk_text') as mock_chunk:
                         mock_chunk.return_value = [Mock(text="chunk1"), Mock(text="chunk2")]
                         
@@ -168,17 +169,25 @@ class TestProcessDocument:
                         assert result.chunks_count == 2
                         assert result.document_id == "doc"
     
-    def test_process_scanned_pdf_skipped(self):
-        """Test scanned PDF is skipped."""
+    def test_process_scanned_pdf_with_textract(self):
+        """Test scanned PDF is processed with Textract."""
         with patch('boto3.client'):
             worker = SQSWorker(queue_url="url", documents_bucket="bucket")
             worker._download_from_s3 = Mock(return_value=b"fake pdf")
             
             with patch('app.services.sqs_worker.detect_pdf_type', return_value=PDFType.SCANNED):
-                result = worker._process_document("bucket", "scan.pdf", "scan")
+                mock_content = Mock()
+                mock_content.full_text = "Scanned text extracted"
+                mock_content.total_chars = 22
+                mock_content.total_pages = 1
+                mock_content.metadata = {}
+                mock_content.extraction_method = "textract"
                 
-                assert result.status == ProcessingStatus.SKIPPED
-                assert "Textract" in result.error_message
+                with patch('app.services.sqs_worker.extract_pdf_auto', return_value=mock_content):
+                    with patch('app.services.sqs_worker.chunk_text', return_value=[Mock(text="chunk")]):
+                        result = worker._process_document("bucket", "scan.pdf", "scan")
+                        
+                        assert result.status == ProcessingStatus.COMPLETED
     
     def test_process_unknown_pdf_failed(self):
         """Test unknown PDF type fails."""
@@ -211,8 +220,9 @@ class TestProcessDocument:
             with patch('app.services.sqs_worker.detect_pdf_type', return_value=PDFType.DIGITAL):
                 mock_content = Mock()
                 mock_content.full_text = ""
+                mock_content.extraction_method = "pypdf2"
                 
-                with patch('app.services.sqs_worker.extract_text_from_pdf', return_value=mock_content):
+                with patch('app.services.sqs_worker.extract_pdf_auto', return_value=mock_content):
                     result = worker._process_document("bucket", "empty.pdf", "empty")
                     
                     assert result.status == ProcessingStatus.FAILED
@@ -240,8 +250,9 @@ class TestCallbacks:
                 mock_content.total_chars = 500
                 mock_content.total_pages = 1
                 mock_content.metadata = {}
+                mock_content.extraction_method = "pypdf2"
                 
-                with patch('app.services.sqs_worker.extract_text_from_pdf', return_value=mock_content):
+                with patch('app.services.sqs_worker.extract_pdf_auto', return_value=mock_content):
                     mock_chunks = [Mock(text="chunk1"), Mock(text="chunk2")]
                     with patch('app.services.sqs_worker.chunk_text', return_value=mock_chunks):
                         worker._process_document("bucket", "doc.pdf", "doc")
@@ -268,8 +279,9 @@ class TestCallbacks:
                 mock_content.total_chars = 4
                 mock_content.total_pages = 1
                 mock_content.metadata = {}
+                mock_content.extraction_method = "pypdf2"
                 
-                with patch('app.services.sqs_worker.extract_text_from_pdf', return_value=mock_content):
+                with patch('app.services.sqs_worker.extract_pdf_auto', return_value=mock_content):
                     with patch('app.services.sqs_worker.chunk_text', return_value=[Mock(text="c1")]):
                         worker._process_document("bucket", "doc.pdf", "doc")
                         
