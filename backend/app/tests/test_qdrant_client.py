@@ -107,7 +107,7 @@ class TestQdrantVectorStore:
     
     def test_search_returns_results(self, vector_store):
         """Test search returns SearchResult objects."""
-        # Mock search response
+        # Mock query_points response (qdrant-client >= 1.7)
         mock_hit = MagicMock()
         mock_hit.id = "point-123"
         mock_hit.score = 0.95
@@ -118,7 +118,9 @@ class TestQdrantVectorStore:
             "text": "test content",
             "is_table": False,
         }
-        vector_store.client.search.return_value = [mock_hit]
+        mock_result = MagicMock()
+        mock_result.points = [mock_hit]
+        vector_store.client.query_points.return_value = mock_result
         
         query_vector = [0.1] * 1024
         results = vector_store.search(query_vector, top_k=5)
@@ -138,13 +140,15 @@ class TestQdrantVectorStore:
     
     def test_search_with_doc_filter(self, vector_store):
         """Test search with document ID filter."""
-        vector_store.client.search.return_value = []
+        mock_result = MagicMock()
+        mock_result.points = []
+        vector_store.client.query_points.return_value = mock_result
         
         query_vector = [0.1] * 1024
         vector_store.search(query_vector, doc_id="specific-doc")
         
-        # Verify filter was passed
-        call_args = vector_store.client.search.call_args
+        # Verify query_points was called with filter
+        call_args = vector_store.client.query_points.call_args
         assert call_args.kwargs.get('query_filter') is not None
     
     def test_delete_document(self, vector_store):
@@ -210,6 +214,291 @@ class TestSearchResult:
         assert result.id == "point-1"
         assert result.score == 0.9
         assert result.doc_id == "doc-1"
+    
+    def test_search_result_to_dict(self):
+        """Test SearchResult to_dict method."""
+        result = SearchResult(
+            id="point-1",
+            score=0.9,
+            doc_id="doc-1",
+            chunk_index=2,
+            page=5,
+            text="test content",
+            is_table=True,
+        )
+        
+        d = result.to_dict()
+        assert d["id"] == "point-1"
+        assert d["score"] == 0.9
+        assert d["doc_id"] == "doc-1"
+        assert d["chunk_index"] == 2
+        assert d["page"] == 5
+        assert d["text"] == "test content"
+        assert d["is_table"] is True
+
+
+class TestRAGContext:
+    """Tests for RAGContext dataclass (Task #25)."""
+    
+    def test_rag_context_creation(self):
+        """Test RAGContext can be created."""
+        from app.services.qdrant_client import RAGContext
+        
+        ctx = RAGContext(
+            text="relevant content",
+            doc_id="doc-1",
+            page=3,
+            chunk_index=5,
+            score=0.85,
+            citation_id=1,
+            is_table=False,
+        )
+        
+        assert ctx.text == "relevant content"
+        assert ctx.citation_id == 1
+        assert ctx.score == 0.85
+    
+    def test_rag_context_to_dict(self):
+        """Test RAGContext to_dict method."""
+        from app.services.qdrant_client import RAGContext
+        
+        ctx = RAGContext(
+            text="content",
+            doc_id="doc-1",
+            page=1,
+            chunk_index=0,
+            score=0.9,
+            citation_id=2,
+        )
+        
+        d = ctx.to_dict()
+        assert d["citation_id"] == 2
+        assert d["score"] == 0.9
+
+
+class TestSearchFilter:
+    """Tests for SearchFilter dataclass (Task #25)."""
+    
+    def test_search_filter_defaults(self):
+        """Test SearchFilter default values."""
+        from app.services.qdrant_client import SearchFilter
+        
+        f = SearchFilter()
+        assert f.doc_ids is None
+        assert f.page_min is None
+        assert f.page_max is None
+        assert f.is_table is None
+        assert f.exclude_doc_ids is None
+    
+    def test_search_filter_with_values(self):
+        """Test SearchFilter with values."""
+        from app.services.qdrant_client import SearchFilter
+        
+        f = SearchFilter(
+            doc_ids=["doc-1", "doc-2"],
+            page_min=1,
+            page_max=10,
+            is_table=False,
+        )
+        
+        assert f.doc_ids == ["doc-1", "doc-2"]
+        assert f.page_min == 1
+        assert f.page_max == 10
+
+
+class TestBuildFilter:
+    """Tests for _build_filter method (Task #25)."""
+    
+    @pytest.fixture
+    def vector_store(self):
+        """Create vector store with mocked client."""
+        with patch('app.services.qdrant_client.QdrantClient') as mock:
+            mock_instance = MagicMock()
+            mock.return_value = mock_instance
+            mock_instance.get_collections.return_value = MagicMock(collections=[])
+            return QdrantVectorStore(host="localhost", port=6333)
+    
+    def test_build_filter_none(self, vector_store):
+        """Test _build_filter returns None when no filter."""
+        result = vector_store._build_filter(None, None)
+        assert result is None
+    
+    def test_build_filter_legacy_doc_id(self, vector_store):
+        """Test _build_filter with legacy doc_id."""
+        result = vector_store._build_filter(None, "doc-123")
+        assert result is not None
+        assert len(result.must) == 1
+    
+    def test_build_filter_multiple_doc_ids(self, vector_store):
+        """Test _build_filter with multiple doc_ids."""
+        from app.services.qdrant_client import SearchFilter
+        
+        f = SearchFilter(doc_ids=["doc-1", "doc-2", "doc-3"])
+        result = vector_store._build_filter(f)
+        
+        assert result is not None
+        assert len(result.must) == 1
+    
+    def test_build_filter_single_doc_id(self, vector_store):
+        """Test _build_filter with single doc_id in list."""
+        from app.services.qdrant_client import SearchFilter
+        
+        f = SearchFilter(doc_ids=["doc-1"])
+        result = vector_store._build_filter(f)
+        
+        assert result is not None
+    
+    def test_build_filter_page_range(self, vector_store):
+        """Test _build_filter with page range."""
+        from app.services.qdrant_client import SearchFilter
+        
+        f = SearchFilter(page_min=5, page_max=10)
+        result = vector_store._build_filter(f)
+        
+        assert result is not None
+        assert len(result.must) == 1
+    
+    def test_build_filter_is_table(self, vector_store):
+        """Test _build_filter with is_table filter."""
+        from app.services.qdrant_client import SearchFilter
+        
+        f = SearchFilter(is_table=True)
+        result = vector_store._build_filter(f)
+        
+        assert result is not None
+    
+    def test_build_filter_exclude_docs(self, vector_store):
+        """Test _build_filter with exclude_doc_ids."""
+        from app.services.qdrant_client import SearchFilter
+        
+        f = SearchFilter(exclude_doc_ids=["doc-bad"])
+        result = vector_store._build_filter(f)
+        
+        assert result is not None
+        assert result.must_not is not None
+
+
+class TestSearchForRAG:
+    """Tests for search_for_rag method (Task #25)."""
+    
+    @pytest.fixture
+    def vector_store(self):
+        """Create vector store with mocked client."""
+        with patch('app.services.qdrant_client.QdrantClient') as mock:
+            mock_instance = MagicMock()
+            mock.return_value = mock_instance
+            mock_instance.get_collections.return_value = MagicMock(collections=[])
+            return QdrantVectorStore(host="localhost", port=6333)
+    
+    def test_search_for_rag_returns_rag_context(self, vector_store):
+        """Test search_for_rag returns RAGContext objects."""
+        from app.services.qdrant_client import RAGContext
+        
+        # Mock query_points response
+        mock_hit = MagicMock()
+        mock_hit.id = "point-1"
+        mock_hit.score = 0.85
+        mock_hit.payload = {
+            "doc_id": "doc-1",
+            "chunk_index": 0,
+            "page": 1,
+            "text": "relevant content",
+            "is_table": False,
+        }
+        mock_result = MagicMock()
+        mock_result.points = [mock_hit]
+        vector_store.client.query_points.return_value = mock_result
+        
+        query_vector = [0.1] * 1024
+        results = vector_store.search_for_rag(query_vector, top_k=5)
+        
+        assert len(results) == 1
+        assert isinstance(results[0], RAGContext)
+        assert results[0].citation_id == 1
+        assert results[0].text == "relevant content"
+    
+    def test_search_for_rag_assigns_citation_ids(self, vector_store):
+        """Test citation IDs are assigned sequentially."""
+        from app.services.qdrant_client import RAGContext
+        
+        # Mock multiple results
+        mock_hits = []
+        for i in range(3):
+            hit = MagicMock()
+            hit.id = f"point-{i}"
+            hit.score = 0.9 - i * 0.1
+            hit.payload = {
+                "doc_id": f"doc-{i}",
+                "chunk_index": i,
+                "page": 1,
+                "text": f"content {i}",
+                "is_table": False,
+            }
+            mock_hits.append(hit)
+        
+        mock_result = MagicMock()
+        mock_result.points = mock_hits
+        vector_store.client.query_points.return_value = mock_result
+        
+        query_vector = [0.1] * 1024
+        results = vector_store.search_for_rag(query_vector, top_k=5, deduplicate=False)
+        
+        assert results[0].citation_id == 1
+        assert results[1].citation_id == 2
+        assert results[2].citation_id == 3
+
+
+class TestDeduplicateResults:
+    """Tests for _deduplicate_results method (Task #25)."""
+    
+    @pytest.fixture
+    def vector_store(self):
+        """Create vector store with mocked client."""
+        with patch('app.services.qdrant_client.QdrantClient') as mock:
+            mock_instance = MagicMock()
+            mock.return_value = mock_instance
+            mock_instance.get_collections.return_value = MagicMock(collections=[])
+            return QdrantVectorStore(host="localhost", port=6333)
+    
+    def test_deduplicate_empty(self, vector_store):
+        """Test deduplication with empty list."""
+        result = vector_store._deduplicate_results([])
+        assert result == []
+    
+    def test_deduplicate_removes_adjacent_lower_score(self, vector_store):
+        """Test deduplication removes adjacent chunks with lower scores."""
+        results = [
+            SearchResult("1", 0.9, "doc-1", 0, 1, "text 0", False),
+            SearchResult("2", 0.7, "doc-1", 1, 1, "text 1", False),  # Adjacent, lower score
+        ]
+        
+        deduplicated = vector_store._deduplicate_results(results)
+        
+        # Should keep first (higher score), remove second (adjacent, lower)
+        assert len(deduplicated) == 1
+        assert deduplicated[0].chunk_index == 0
+    
+    def test_deduplicate_keeps_different_docs(self, vector_store):
+        """Test deduplication keeps chunks from different docs."""
+        results = [
+            SearchResult("1", 0.9, "doc-1", 0, 1, "text", False),
+            SearchResult("2", 0.8, "doc-2", 0, 1, "text", False),
+        ]
+        
+        deduplicated = vector_store._deduplicate_results(results)
+        
+        assert len(deduplicated) == 2
+    
+    def test_deduplicate_keeps_non_adjacent(self, vector_store):
+        """Test deduplication keeps non-adjacent chunks from same doc."""
+        results = [
+            SearchResult("1", 0.9, "doc-1", 0, 1, "text 0", False),
+            SearchResult("2", 0.8, "doc-1", 5, 2, "text 5", False),  # Not adjacent
+        ]
+        
+        deduplicated = vector_store._deduplicate_results(results)
+        
+        assert len(deduplicated) == 2
 
 
 class TestCreateQdrantStore:
