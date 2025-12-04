@@ -1,0 +1,482 @@
+"""
+Task #29: Chat History Storage in DynamoDB
+
+Manages chat message storage and retrieval for conversation context.
+Stores messages with conversation_id, retrieves history for RAG context.
+
+Table schema (arc-chatbot-dev-chat-history):
+- user_id (PK): User identifier
+- sk (SK): Sort key format "CONV#{conversation_id}#MSG#{timestamp}"
+- conversation_id: Conversation identifier (GSI hash key)
+- created_at: Message timestamp (GSI range key)
+- role: "user" or "assistant"
+- content: Message content
+- citations: List of citation references (for assistant messages)
+- usage: Token usage info (for assistant messages)
+"""
+
+import os
+import uuid
+from datetime import datetime, timezone
+from typing import Optional, List, Dict, Any
+from dataclasses import dataclass, field
+from enum import Enum
+import boto3
+from botocore.exceptions import ClientError
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+class MessageRole(str, Enum):
+    """Message role in conversation."""
+    USER = "user"
+    ASSISTANT = "assistant"
+
+
+@dataclass
+class ChatMessage:
+    """Chat message data structure."""
+    conversation_id: str
+    role: MessageRole
+    content: str
+    created_at: str
+    user_id: str = "anonymous"
+    message_id: Optional[str] = None
+    citations: Optional[List[Dict[str, Any]]] = None
+    usage: Optional[Dict[str, int]] = None
+    model: Optional[str] = None
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary."""
+        result = {
+            "conversation_id": self.conversation_id,
+            "role": self.role.value if isinstance(self.role, MessageRole) else self.role,
+            "content": self.content,
+            "created_at": self.created_at,
+            "user_id": self.user_id,
+        }
+        if self.message_id:
+            result["message_id"] = self.message_id
+        if self.citations:
+            result["citations"] = self.citations
+        if self.usage:
+            result["usage"] = self.usage
+        if self.model:
+            result["model"] = self.model
+        return result
+
+
+@dataclass
+class Conversation:
+    """Conversation metadata."""
+    conversation_id: str
+    user_id: str
+    title: Optional[str] = None
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+    message_count: int = 0
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "conversation_id": self.conversation_id,
+            "user_id": self.user_id,
+            "title": self.title,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+            "message_count": self.message_count,
+        }
+
+
+class ChatHistoryManager:
+    """
+    Manages chat history storage in DynamoDB.
+    
+    Supports:
+    - Storing user and assistant messages
+    - Retrieving conversation history for context
+    - Listing user conversations
+    - Conversation metadata management
+    """
+    
+    def __init__(
+        self,
+        table_name: Optional[str] = None,
+        dynamodb_client=None,
+        region_name: Optional[str] = None,
+    ):
+        """
+        Initialize chat history manager.
+        
+        Args:
+            table_name: DynamoDB table name. Defaults to env var.
+            dynamodb_client: Optional boto3 client for testing.
+            region_name: AWS region.
+        """
+        self.table_name = table_name or os.getenv(
+            "CHAT_HISTORY_TABLE_NAME",
+            "arc-chatbot-dev-chat-history"
+        )
+        self.region_name = region_name or os.getenv("AWS_REGION", "ap-southeast-1")
+        
+        if dynamodb_client:
+            self._client = dynamodb_client
+        else:
+            self._client = boto3.client(
+                "dynamodb",
+                region_name=self.region_name
+            )
+        
+        logger.info(f"Initialized ChatHistoryManager with table: {self.table_name}")
+
+    def _generate_message_id(self) -> str:
+        """Generate unique message ID."""
+        return f"msg-{uuid.uuid4().hex[:12]}"
+    
+    def _get_timestamp(self) -> str:
+        """Get current UTC timestamp in ISO format."""
+        return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    
+    def _build_sk(self, conversation_id: str, timestamp: str) -> str:
+        """Build sort key for message."""
+        return f"CONV#{conversation_id}#MSG#{timestamp}"
+    
+    def _build_conv_sk(self, conversation_id: str) -> str:
+        """Build sort key for conversation metadata."""
+        return f"CONV#{conversation_id}#META"
+
+    def save_message(
+        self,
+        conversation_id: str,
+        role: MessageRole,
+        content: str,
+        user_id: str = "anonymous",
+        citations: Optional[List[Dict[str, Any]]] = None,
+        usage: Optional[Dict[str, int]] = None,
+        model: Optional[str] = None,
+    ) -> ChatMessage:
+        """
+        Save a chat message to DynamoDB.
+        
+        Args:
+            conversation_id: Conversation identifier
+            role: Message role (user/assistant)
+            content: Message content
+            user_id: User identifier
+            citations: Citation references (for assistant)
+            usage: Token usage info (for assistant)
+            model: Model used (for assistant)
+            
+        Returns:
+            ChatMessage: Saved message object
+        """
+        timestamp = self._get_timestamp()
+        message_id = self._generate_message_id()
+        sk = self._build_sk(conversation_id, timestamp)
+        
+        item = {
+            "user_id": {"S": user_id},
+            "sk": {"S": sk},
+            "conversation_id": {"S": conversation_id},
+            "created_at": {"S": timestamp},
+            "message_id": {"S": message_id},
+            "role": {"S": role.value if isinstance(role, MessageRole) else role},
+            "content": {"S": content},
+        }
+        
+        # Add optional fields for assistant messages
+        if citations:
+            item["citations"] = {"S": self._serialize_json(citations)}
+        if usage:
+            item["usage"] = {"M": {
+                "input_tokens": {"N": str(usage.get("input_tokens", 0))},
+                "output_tokens": {"N": str(usage.get("output_tokens", 0))},
+                "total_tokens": {"N": str(usage.get("total_tokens", 0))},
+            }}
+        if model:
+            item["model"] = {"S": model}
+        
+        try:
+            self._client.put_item(
+                TableName=self.table_name,
+                Item=item,
+            )
+            
+            logger.debug(f"Saved message {message_id} to conversation {conversation_id}")
+            
+            return ChatMessage(
+                conversation_id=conversation_id,
+                role=role,
+                content=content,
+                created_at=timestamp,
+                user_id=user_id,
+                message_id=message_id,
+                citations=citations,
+                usage=usage,
+                model=model,
+            )
+        except ClientError as e:
+            logger.error(f"Failed to save message: {e}")
+            raise
+
+    def save_user_message(
+        self,
+        conversation_id: str,
+        content: str,
+        user_id: str = "anonymous",
+    ) -> ChatMessage:
+        """Save a user message."""
+        return self.save_message(
+            conversation_id=conversation_id,
+            role=MessageRole.USER,
+            content=content,
+            user_id=user_id,
+        )
+
+    def save_assistant_message(
+        self,
+        conversation_id: str,
+        content: str,
+        user_id: str = "anonymous",
+        citations: Optional[List[Dict[str, Any]]] = None,
+        usage: Optional[Dict[str, int]] = None,
+        model: Optional[str] = None,
+    ) -> ChatMessage:
+        """Save an assistant message with metadata."""
+        return self.save_message(
+            conversation_id=conversation_id,
+            role=MessageRole.ASSISTANT,
+            content=content,
+            user_id=user_id,
+            citations=citations,
+            usage=usage,
+            model=model,
+        )
+
+    def get_conversation_history(
+        self,
+        conversation_id: str,
+        limit: int = 20,
+        ascending: bool = True,
+    ) -> List[ChatMessage]:
+        """
+        Get messages for a conversation.
+        
+        Uses GSI (conversation-index) to query by conversation_id.
+        
+        Args:
+            conversation_id: Conversation identifier
+            limit: Maximum messages to return
+            ascending: Sort order (True = oldest first)
+            
+        Returns:
+            List of ChatMessage objects
+        """
+        try:
+            response = self._client.query(
+                TableName=self.table_name,
+                IndexName="conversation-index",
+                KeyConditionExpression="conversation_id = :conv_id",
+                ExpressionAttributeValues={
+                    ":conv_id": {"S": conversation_id}
+                },
+                Limit=limit,
+                ScanIndexForward=ascending,
+            )
+            
+            messages = []
+            for item in response.get("Items", []):
+                messages.append(self._parse_message(item))
+            
+            logger.debug(f"Retrieved {len(messages)} messages for conversation {conversation_id}")
+            return messages
+            
+        except ClientError as e:
+            logger.error(f"Failed to get conversation history: {e}")
+            raise
+
+    def get_history_for_context(
+        self,
+        conversation_id: str,
+        max_messages: int = 10,
+    ) -> List[Dict[str, str]]:
+        """
+        Get conversation history formatted for Claude context.
+        
+        Returns messages in the format expected by Claude's messages API:
+        [{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}]
+        
+        Args:
+            conversation_id: Conversation identifier
+            max_messages: Maximum messages to include
+            
+        Returns:
+            List of message dicts for Claude
+        """
+        messages = self.get_conversation_history(
+            conversation_id=conversation_id,
+            limit=max_messages,
+            ascending=True,  # Oldest first for context
+        )
+        
+        return [
+            {"role": msg.role.value if isinstance(msg.role, MessageRole) else msg.role, 
+             "content": msg.content}
+            for msg in messages
+        ]
+
+    def list_conversations(
+        self,
+        user_id: str,
+        limit: int = 20,
+        last_evaluated_key: Optional[Dict] = None,
+    ) -> Dict[str, Any]:
+        """
+        List conversations for a user.
+        
+        Args:
+            user_id: User identifier
+            limit: Maximum conversations to return
+            last_evaluated_key: Pagination token
+            
+        Returns:
+            Dict with conversations and pagination info
+        """
+        try:
+            params = {
+                "TableName": self.table_name,
+                "KeyConditionExpression": "user_id = :uid AND begins_with(sk, :prefix)",
+                "ExpressionAttributeValues": {
+                    ":uid": {"S": user_id},
+                    ":prefix": {"S": "CONV#"},
+                },
+                "Limit": limit * 2,  # Get more to deduplicate
+                "ScanIndexForward": False,  # Newest first
+            }
+            
+            if last_evaluated_key:
+                params["ExclusiveStartKey"] = last_evaluated_key
+            
+            response = self._client.query(**params)
+            
+            # Group by conversation_id and get latest message
+            conversations = {}
+            for item in response.get("Items", []):
+                conv_id = item.get("conversation_id", {}).get("S")
+                if conv_id and conv_id not in conversations:
+                    msg = self._parse_message(item)
+                    conversations[conv_id] = {
+                        "conversation_id": conv_id,
+                        "user_id": user_id,
+                        "last_message": msg.content[:100] + "..." if len(msg.content) > 100 else msg.content,
+                        "last_message_at": msg.created_at,
+                        "last_role": msg.role.value if isinstance(msg.role, MessageRole) else msg.role,
+                    }
+                    if len(conversations) >= limit:
+                        break
+            
+            return {
+                "conversations": list(conversations.values()),
+                "last_evaluated_key": response.get("LastEvaluatedKey"),
+            }
+            
+        except ClientError as e:
+            logger.error(f"Failed to list conversations: {e}")
+            raise
+
+    def delete_conversation(
+        self,
+        conversation_id: str,
+        user_id: str,
+    ) -> int:
+        """
+        Delete all messages in a conversation.
+        
+        Args:
+            conversation_id: Conversation to delete
+            user_id: User identifier
+            
+        Returns:
+            Number of messages deleted
+        """
+        messages = self.get_conversation_history(conversation_id, limit=100)
+        deleted = 0
+        
+        for msg in messages:
+            try:
+                sk = self._build_sk(conversation_id, msg.created_at)
+                self._client.delete_item(
+                    TableName=self.table_name,
+                    Key={
+                        "user_id": {"S": user_id},
+                        "sk": {"S": sk},
+                    }
+                )
+                deleted += 1
+            except ClientError as e:
+                logger.error(f"Failed to delete message: {e}")
+        
+        logger.info(f"Deleted {deleted} messages from conversation {conversation_id}")
+        return deleted
+
+    def _parse_message(self, item: Dict) -> ChatMessage:
+        """Parse DynamoDB item to ChatMessage."""
+        role_str = item.get("role", {}).get("S", "user")
+        try:
+            role = MessageRole(role_str)
+        except ValueError:
+            role = role_str
+        
+        # Parse usage if present
+        usage = None
+        if "usage" in item:
+            usage_map = item["usage"].get("M", {})
+            usage = {
+                "input_tokens": int(usage_map.get("input_tokens", {}).get("N", 0)),
+                "output_tokens": int(usage_map.get("output_tokens", {}).get("N", 0)),
+                "total_tokens": int(usage_map.get("total_tokens", {}).get("N", 0)),
+            }
+        
+        # Parse citations if present
+        citations = None
+        if "citations" in item:
+            citations_str = item["citations"].get("S")
+            if citations_str:
+                citations = self._deserialize_json(citations_str)
+        
+        return ChatMessage(
+            conversation_id=item.get("conversation_id", {}).get("S", ""),
+            role=role,
+            content=item.get("content", {}).get("S", ""),
+            created_at=item.get("created_at", {}).get("S", ""),
+            user_id=item.get("user_id", {}).get("S", "anonymous"),
+            message_id=item.get("message_id", {}).get("S"),
+            citations=citations,
+            usage=usage,
+            model=item.get("model", {}).get("S"),
+        )
+
+    def _serialize_json(self, data: Any) -> str:
+        """Serialize data to JSON string."""
+        import json
+        return json.dumps(data)
+    
+    def _deserialize_json(self, data: str) -> Any:
+        """Deserialize JSON string to data."""
+        import json
+        try:
+            return json.loads(data)
+        except json.JSONDecodeError:
+            return None
+
+
+# Convenience function
+def create_chat_history_manager(
+    table_name: Optional[str] = None,
+    region_name: Optional[str] = None,
+) -> ChatHistoryManager:
+    """Create ChatHistoryManager instance."""
+    return ChatHistoryManager(
+        table_name=table_name,
+        region_name=region_name,
+    )
