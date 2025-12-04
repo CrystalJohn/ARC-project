@@ -314,13 +314,18 @@ class RAGService:
             score_threshold=0.0  # Get all results, filter later
         )
         
+        # SearchResult has direct attributes, not payload dict
         return [
             {
                 "chunk_id": str(r.id),
-                "text": r.payload.get("text", ""),
-                "doc_id": r.payload.get("doc_id", ""),
+                "text": r.text,
+                "doc_id": r.doc_id,
                 "score": r.score,
-                "metadata": r.payload
+                "metadata": {
+                    "page": r.page,
+                    "chunk_index": r.chunk_index,
+                    "is_table": r.is_table,
+                }
             }
             for r in results
         ]
