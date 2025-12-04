@@ -651,6 +651,51 @@ class QdrantVectorStore:
             logger.error(f"Error getting collection info: {e}")
             return {}
     
+    def get_all_points(self, limit: int = 10000) -> List[Dict]:
+        """
+        Get all points from collection for BM25 indexing.
+        
+        Layer 3: Hybrid Retrieval support.
+        
+        Args:
+            limit: Maximum number of points to retrieve
+            
+        Returns:
+            List of points with id and payload
+        """
+        try:
+            all_points = []
+            offset = None
+            
+            while len(all_points) < limit:
+                batch_limit = min(100, limit - len(all_points))
+                
+                scroll_result = self.client.scroll(
+                    collection_name=self.COLLECTION_NAME,
+                    limit=batch_limit,
+                    offset=offset,
+                    with_payload=True,
+                    with_vectors=False,  # Don't need vectors for BM25
+                )
+                
+                points, offset = scroll_result
+                
+                for point in points:
+                    all_points.append({
+                        "id": str(point.id),
+                        "payload": point.payload or {}
+                    })
+                
+                if offset is None or len(points) == 0:
+                    break
+            
+            logger.info(f"Retrieved {len(all_points)} points for BM25 indexing")
+            return all_points
+            
+        except Exception as e:
+            logger.error(f"Error getting all points: {e}")
+            return []
+    
     def health_check(self) -> bool:
         """Check if Qdrant is healthy."""
         try:

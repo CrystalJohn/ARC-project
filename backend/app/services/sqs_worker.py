@@ -17,7 +17,7 @@ from botocore.exceptions import ClientError
 
 from .pdf_detector import detect_pdf_type, PDFType
 from .pdf_extractor import extract_text_from_pdf, extract_pdf_auto, TextractExtractor
-from .text_chunker import chunk_text, TextChunk
+from .text_chunker import chunk_text, chunk_text_with_tables, TextChunk
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -183,7 +183,7 @@ class SQSWorker:
             
             bucket = s3_event['bucket']
             key = s3_event['key']
-            document_id = self._extract_document_id(key)
+            document_id = self._extract_document_id(key, s3_event.get('doc_id'))
             
             logger.info(f"Processing document: {document_id} from s3://{bucket}/{key}")
             
@@ -234,17 +234,30 @@ class SQSWorker:
                 'bucket': record['s3']['bucket']['name'],
                 'key': record['s3']['object']['key'],
                 'size': record['s3']['object'].get('size', 0),
-                'event_time': record.get('eventTime')
+                'event_time': record.get('eventTime'),
+                'doc_id': body.get('doc_id')  # Get doc_id from message if provided
             }
         except (KeyError, IndexError, json.JSONDecodeError) as e:
             logger.error(f"Error parsing S3 event: {e}")
             return None
     
-    def _extract_document_id(self, key: str) -> str:
-        """Extract document ID from S3 key."""
-        # Assume key format: uploads/{document_id}.pdf or {document_id}.pdf
+    def _extract_document_id(self, key: str, doc_id: Optional[str] = None) -> str:
+        """Extract document ID from S3 key or use provided doc_id."""
+        # Use provided doc_id if available (from admin upload)
+        if doc_id:
+            return doc_id
+        
+        # Fallback: try to extract UUID from key format: uploads/{uuid}/{filename}.pdf
+        parts = key.split('/')
+        if len(parts) >= 2 and parts[0] == 'uploads':
+            # Check if second part looks like a UUID
+            potential_uuid = parts[1]
+            if len(potential_uuid) == 36 and potential_uuid.count('-') == 4:
+                return potential_uuid
+        
+        # Last fallback: use filename without extension
         filename = key.split('/')[-1]
-        return filename.rsplit('.', 1)[0]  # Remove extension
+        return filename.rsplit('.', 1)[0]
     
     def _process_document(
         self, 
@@ -300,10 +313,38 @@ class SQSWorker:
                     error_message="No text extracted from PDF"
                 )
             
-            # 4. Chunk text
-            logger.info("Chunking text...")
-            chunks = chunk_text(pdf_content.full_text)
-            logger.info(f"Created {len(chunks)} chunks")
+            # 4. Chunk text with table handling
+            logger.info("Chunking text with table detection...")
+            
+            # Collect tables from all pages
+            all_tables = []
+            table_names = []
+            for page in pdf_content.pages:
+                if page.tables:
+                    for i, table in enumerate(page.tables):
+                        all_tables.append(table)
+                        table_names.append(f"Table (Page {page.page_number}, #{i+1})")
+            
+            if all_tables:
+                logger.info(f"Found {len(all_tables)} tables, using row-based chunking with header injection")
+                chunks = chunk_text_with_tables(
+                    text=pdf_content.full_text,
+                    tables=all_tables,
+                    table_names=table_names,
+                    rows_per_chunk=5  # 5 rows per table chunk
+                )
+            else:
+                # No tables from extractor, try to detect in text
+                chunks = chunk_text_with_tables(
+                    text=pdf_content.full_text,
+                    tables=None,  # Will auto-detect
+                    rows_per_chunk=5
+                )
+            
+            # Count table vs text chunks
+            table_chunks = [c for c in chunks if c.is_table]
+            text_chunks = [c for c in chunks if not c.is_table]
+            logger.info(f"Created {len(chunks)} chunks ({len(table_chunks)} table, {len(text_chunks)} text)")
             
             # 5. Generate embeddings (if callback provided)
             vectors = []

@@ -3,6 +3,8 @@ Task #27: RAG Prompt Template with Citations
 
 Provides RAG orchestration with context injection and citation formatting.
 Combines vector search, prompt building, and Claude inference.
+
+Layer 3: Hybrid Retrieval (BM25 + Vector Search) for improved relevance.
 """
 
 import logging
@@ -22,6 +24,7 @@ from app.services.claude_service import (
     StreamChunk,
     TokenUsage,
 )
+from app.services.bm25_search import BM25Index, HybridRetriever, BM25Result
 
 logger = logging.getLogger(__name__)
 
@@ -36,28 +39,68 @@ class PromptTemplate(Enum):
 
 # System prompts for different templates
 SYSTEM_PROMPTS = {
-    PromptTemplate.DEFAULT: """You are a helpful research assistant for an academic chatbot.
-Your role is to answer questions based on the provided document context.
-Always cite your sources using [1], [2], etc. format when referencing information.
-If the context doesn't contain relevant information to answer the question, say so clearly.
-Be accurate and helpful.""",
+    PromptTemplate.DEFAULT: """You are an expert research assistant for academic documents.
 
-    PromptTemplate.ACADEMIC: """You are an academic research assistant specializing in scholarly content.
-Provide well-structured, academic-style responses based on the provided context.
-Always cite sources using [1], [2], etc. format. Include page numbers when relevant.
-Use formal language appropriate for academic discourse.
-If information is not in the context, acknowledge the limitation.""",
+CRITICAL INSTRUCTIONS:
+1. ALWAYS answer based ONLY on the provided document context below
+2. NEVER use your general knowledge - only use information from the context
+3. ALWAYS cite sources using [1], [2], etc. for EVERY piece of information
+4. If the context contains relevant information, extract and present it clearly
+5. If the context does NOT contain the answer, say "The provided documents do not contain specific information about [topic]"
+
+When answering:
+- Quote or paraphrase directly from the context
+- Be specific and detailed using the document content
+- Organize your answer clearly with the information found
+- Include page numbers when citing: "According to [1] (page X)..."
+
+Remember: Your knowledge comes ONLY from the provided context, not from training data.""",
+
+    PromptTemplate.ACADEMIC: """You are an academic research assistant specializing in scholarly content analysis.
+
+CRITICAL INSTRUCTIONS:
+1. Base ALL responses EXCLUSIVELY on the provided document context
+2. Use formal academic language and structure
+3. ALWAYS cite sources: [1], [2], etc. with page numbers
+4. Synthesize information across multiple sources when relevant
+5. Do NOT use external knowledge - only the provided context
+
+Response format:
+- Start with a direct answer to the question
+- Support with evidence from the documents
+- Use academic terminology from the sources
+- Conclude with synthesis or implications
+
+If context lacks information: "The provided academic sources do not address [specific topic].""",
 
     PromptTemplate.CONCISE: """You are a concise research assistant.
-Answer questions briefly and directly based on the provided context.
-Use citations [1], [2], etc. Keep responses short but informative.
-If context lacks relevant info, say so briefly.""",
 
-    PromptTemplate.DETAILED: """You are a thorough research assistant.
-Provide comprehensive, detailed answers based on the provided context.
-Always cite sources using [1], [2], etc. Explain concepts fully.
-Include relevant details, examples, and connections between sources.
-If context is insufficient, explain what additional information would be helpful.""",
+RULES:
+1. Answer ONLY from the provided context
+2. Be brief but complete
+3. Cite every fact: [1], [2], etc.
+4. No general knowledge - only document content
+5. If not in context: "Not found in provided documents."
+
+Format: Direct answer + citations. Maximum 3-4 sentences.""",
+
+    PromptTemplate.DETAILED: """You are a thorough research assistant providing comprehensive analysis.
+
+CRITICAL INSTRUCTIONS:
+1. Use ONLY the provided document context for your answer
+2. Extract ALL relevant information from the context
+3. Cite EVERY piece of information: [1], [2], etc. with page numbers
+4. Organize information logically with clear structure
+5. Do NOT supplement with general knowledge
+
+Response structure:
+- Direct answer to the question
+- Detailed explanation from the documents
+- Supporting evidence with citations
+- Connections between different sources
+- Summary of key points
+
+If context is insufficient: Clearly state what information IS available and what is missing.""",
 }
 
 
@@ -109,18 +152,23 @@ class RAGPromptBuilder:
     CONTEXT_TEMPLATE = """[{citation_id}] (Document: {doc_id}, Page {page})
 {text}"""
     
-    QUERY_TEMPLATE = """Based on the following context from research documents, answer the user's question.
-Use citations like [1], [2] to reference the source documents when you use information from them.
+    QUERY_TEMPLATE = """You must answer the following question using ONLY the document context provided below.
+Do NOT use any external knowledge. Extract and present information directly from these documents.
 
-CONTEXT:
+=== DOCUMENT CONTEXT ===
 {context_section}
+=== END CONTEXT ===
 
----
+USER QUESTION: {query}
 
-USER QUESTION:
-{query}
+INSTRUCTIONS:
+1. Read the context carefully and find information relevant to the question
+2. Answer using ONLY information from the context above
+3. Cite every piece of information with [1], [2], etc.
+4. If the context contains the answer, provide a detailed response
+5. If the context does NOT contain the answer, say "The provided documents do not contain information about [topic]"
 
-Please provide a helpful answer based on the context above. Remember to cite your sources."""
+YOUR ANSWER:"""
     
     @classmethod
     def build_context_section(cls, contexts: List[RAGContext]) -> str:
@@ -175,6 +223,8 @@ class RAGService:
     
     Combines vector search, prompt building, and Claude inference
     into a complete RAG pipeline.
+    
+    Layer 3: Supports Hybrid Retrieval (BM25 + Vector) for better relevance.
     """
     
     def __init__(
@@ -184,6 +234,9 @@ class RAGService:
         region_name: str = "ap-southeast-1",
         model: str = "sonnet",
         template: PromptTemplate = PromptTemplate.DEFAULT,
+        use_hybrid: bool = True,
+        bm25_weight: float = 0.3,
+        vector_weight: float = 0.7,
     ):
         """
         Initialize RAG service.
@@ -194,6 +247,9 @@ class RAGService:
             region_name: AWS region for Bedrock
             model: Claude model alias (sonnet/haiku)
             template: Prompt template to use
+            use_hybrid: Enable hybrid retrieval (BM25 + Vector)
+            bm25_weight: Weight for BM25 in hybrid search
+            vector_weight: Weight for vector search in hybrid
         """
         self.vector_store = QdrantVectorStore(host=qdrant_host, port=qdrant_port)
         self.embedding_service = EmbeddingService(region_name=region_name)
@@ -201,7 +257,14 @@ class RAGService:
         self.template = template
         self.prompt_builder = RAGPromptBuilder()
         
-        logger.info(f"Initialized RAG service with model={model}, template={template.value}")
+        # Layer 3: Hybrid Retrieval
+        self.use_hybrid = use_hybrid
+        self.bm25_index = BM25Index() if use_hybrid else None
+        self.bm25_weight = bm25_weight
+        self.vector_weight = vector_weight
+        self._bm25_initialized = False
+        
+        logger.info(f"Initialized RAG service with model={model}, template={template.value}, hybrid={use_hybrid}")
     
     def set_template(self, template: PromptTemplate) -> None:
         """Change prompt template."""
@@ -211,6 +274,56 @@ class RAGService:
     def set_model(self, model: str) -> None:
         """Change Claude model."""
         self.claude_service.switch_model(model)
+    
+    def _init_bm25_from_qdrant(self) -> None:
+        """Initialize BM25 index from Qdrant data."""
+        if not self.use_hybrid or self._bm25_initialized:
+            return
+        
+        try:
+            # Get all documents from Qdrant
+            all_points = self.vector_store.get_all_points(limit=10000)
+            
+            if not all_points:
+                logger.warning("No documents in Qdrant for BM25 indexing")
+                return
+            
+            # Index documents in BM25
+            for point in all_points:
+                payload = point.get("payload", {})
+                self.bm25_index.add_document(
+                    chunk_id=str(point.get("id", "")),
+                    text=payload.get("text", ""),
+                    doc_id=payload.get("doc_id", ""),
+                    metadata=payload
+                )
+            
+            self._bm25_initialized = True
+            logger.info(f"BM25 index initialized with {len(all_points)} documents")
+            
+        except Exception as e:
+            logger.error(f"Failed to initialize BM25 index: {e}")
+    
+    def _vector_search_fn(self, query: str, top_k: int) -> List[Dict]:
+        """Vector search function for hybrid retriever."""
+        query_embedding = self.embedding_service.embed_text(query)
+        
+        results = self.vector_store.search(
+            query_vector=query_embedding,
+            top_k=top_k,
+            score_threshold=0.0  # Get all results, filter later
+        )
+        
+        return [
+            {
+                "chunk_id": str(r.id),
+                "text": r.payload.get("text", ""),
+                "doc_id": r.payload.get("doc_id", ""),
+                "score": r.score,
+                "metadata": r.payload
+            }
+            for r in results
+        ]
     
     def retrieve_contexts(
         self,
@@ -222,6 +335,8 @@ class RAGService:
         """
         Retrieve relevant contexts for a query.
         
+        Uses Hybrid Retrieval (BM25 + Vector) if enabled.
+        
         Args:
             query: User query
             top_k: Number of contexts to retrieve
@@ -231,10 +346,51 @@ class RAGService:
         Returns:
             List of RAGContext objects with citation IDs
         """
-        # Generate query embedding
+        # Try hybrid retrieval first
+        if self.use_hybrid:
+            try:
+                # Initialize BM25 if needed
+                self._init_bm25_from_qdrant()
+                
+                if self._bm25_initialized and self.bm25_index.doc_count > 0:
+                    # Create hybrid retriever
+                    hybrid = HybridRetriever(
+                        bm25_index=self.bm25_index,
+                        vector_search_fn=lambda q, k: self._vector_search_fn(q, k),
+                        bm25_weight=self.bm25_weight,
+                        vector_weight=self.vector_weight
+                    )
+                    
+                    # Perform hybrid search
+                    results = hybrid.search(
+                        query=query,
+                        top_k=top_k,
+                        bm25_top_k=top_k * 3,
+                        vector_top_k=top_k * 3
+                    )
+                    
+                    # Convert to RAGContext
+                    contexts = []
+                    for i, r in enumerate(results):
+                        metadata = r.get("metadata", {})
+                        contexts.append(RAGContext(
+                            citation_id=i + 1,
+                            doc_id=r.get("doc_id", ""),
+                            page=metadata.get("page", 1),
+                            text=r.get("text", ""),
+                            score=r.get("combined_score", 0) * 100,  # Scale to percentage
+                            metadata=metadata
+                        ))
+                    
+                    logger.info(f"Hybrid retrieval: {len(contexts)} contexts for query: {query[:50]}...")
+                    return contexts
+                    
+            except Exception as e:
+                logger.warning(f"Hybrid retrieval failed, falling back to vector: {e}")
+        
+        # Fallback to vector-only search
         query_embedding = self.embedding_service.embed_text(query)
         
-        # Search vector store
         contexts = self.vector_store.search_for_rag(
             query_vector=query_embedding,
             top_k=top_k,
@@ -242,7 +398,7 @@ class RAGService:
             search_filter=search_filter,
         )
         
-        logger.info(f"Retrieved {len(contexts)} contexts for query: {query[:50]}...")
+        logger.info(f"Vector retrieval: {len(contexts)} contexts for query: {query[:50]}...")
         return contexts
     
     def generate_answer(

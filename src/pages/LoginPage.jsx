@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useNavigate, useLocation } from 'react-router-dom'
 import authService from '../services/authService'
 
@@ -13,17 +13,45 @@ function LoginPage() {
   // Get message from navigation state (e.g., session expired)
   const stateMessage = location.state?.message
 
+  // Check if user is already logged in and redirect based on role
+  useEffect(() => {
+    const checkAuth = async () => {
+      if (authService.isAuthenticated()) {
+        const user = await authService.getCurrentUser()
+        if (user) {
+          // User is already logged in, redirect based on role
+          const isAdmin = user.groups?.includes('admin')
+          if (isAdmin) {
+            navigate('/admin', { replace: true })
+          } else {
+            navigate('/chat', { replace: true })
+          }
+        }
+      }
+    }
+    checkAuth()
+  }, [navigate])
+
   const handleLogin = async (e) => {
     e.preventDefault()
     setError('')
     setLoading(true)
 
     try {
+      // Logout any existing session first
+      await authService.logout()
+      
+      // Then login with new credentials
       const result = await authService.login(email, password)
       console.log('Login successful:', result)
       
-      // Redirect to chat page after successful login
-      navigate('/chat', { replace: true })
+      // Redirect based on user role
+      const isAdmin = result.groups?.includes('admin')
+      if (isAdmin) {
+        navigate('/admin', { replace: true })
+      } else {
+        navigate('/chat', { replace: true })
+      }
     } catch (err) {
       console.error('Login failed:', err)
       setError(err.message)
