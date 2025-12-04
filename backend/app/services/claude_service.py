@@ -1,8 +1,14 @@
 """
 Task #26: Bedrock Claude 3.5 Sonnet Integration
+Task #32: Error Handling & Retry Logic for Bedrock
 
 Provides Claude API wrapper with streaming support and token counting.
 Model: anthropic.claude-3-5-sonnet-20240620-v1:0
+
+Features:
+- Exponential backoff retry for transient errors
+- Graceful error messages for users
+- Error classification and handling
 """
 
 import json
@@ -11,6 +17,20 @@ from typing import Optional, Generator, Dict, Any, List
 from dataclasses import dataclass, field
 import boto3
 from botocore.config import Config
+from botocore.exceptions import ClientError, BotoCoreError
+
+from app.services.bedrock_retry import (
+    RetryConfig,
+    RetryableBedrockClient,
+    BedrockError,
+    BedrockThrottlingError,
+    BedrockServiceError,
+    BedrockModelError,
+    BedrockValidationError,
+    BedrockTimeoutError,
+    create_bedrock_error,
+    with_retry,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +109,7 @@ class ClaudeService:
     - Token counting and cost estimation
     - Automatic retry with exponential backoff
     - Model switching (Sonnet/Haiku)
+    - Graceful error handling with user-friendly messages
     """
     
     ANTHROPIC_VERSION = "bedrock-2023-05-31"
@@ -99,7 +120,9 @@ class ClaudeService:
         self,
         region_name: str = "ap-southeast-1",
         model: str = "sonnet",
-        max_retries: int = 3,
+        max_retries: int = 5,
+        base_delay: float = 1.0,
+        max_delay: float = 60.0,
     ):
         """
         Initialize Claude service.
@@ -107,20 +130,47 @@ class ClaudeService:
         Args:
             region_name: AWS region
             model: Model alias ("sonnet" or "haiku")
-            max_retries: Max retry attempts
+            max_retries: Max retry attempts for transient errors
+            base_delay: Initial delay between retries (seconds)
+            max_delay: Maximum delay between retries (seconds)
         """
         self.region_name = region_name
         self.model_alias = model
         self.model_id = CLAUDE_MODELS.get(model, CLAUDE_MODELS["sonnet"])
+        self.max_retries = max_retries
         
-        # Configure boto3 with retries
+        # Configure boto3 with basic retries (we handle advanced retry ourselves)
         config = Config(
             region_name=region_name,
-            retries={"max_attempts": max_retries, "mode": "adaptive"},
+            retries={"max_attempts": 2, "mode": "standard"},
+            connect_timeout=30,
+            read_timeout=120,
         )
         
-        self.client = boto3.client("bedrock-runtime", config=config)
-        logger.info(f"Initialized Claude service with model: {self.model_id}")
+        # Create base client
+        base_client = boto3.client("bedrock-runtime", config=config)
+        
+        # Wrap with retry logic
+        retry_config = RetryConfig(
+            max_retries=max_retries,
+            base_delay=base_delay,
+            max_delay=max_delay,
+        )
+        self.client = RetryableBedrockClient(
+            client=base_client,
+            retry_config=retry_config,
+            on_retry=self._on_retry,
+        )
+        self._base_client = base_client  # Keep reference for streaming
+        
+        logger.info(f"Initialized Claude service with model: {self.model_id}, max_retries: {max_retries}")
+    
+    def _on_retry(self, attempt: int, error: Exception, delay: float) -> None:
+        """Callback for retry events."""
+        logger.warning(
+            f"Claude API retry {attempt + 1}/{self.max_retries}: "
+            f"waiting {delay:.1f}s after {type(error).__name__}"
+        )
     
     def switch_model(self, model: str) -> None:
         """Switch to different model (sonnet/haiku)."""
@@ -162,7 +212,7 @@ class ClaudeService:
         temperature: float = DEFAULT_TEMPERATURE,
     ) -> ClaudeResponse:
         """
-        Invoke Claude synchronously.
+        Invoke Claude synchronously with automatic retry.
         
         Args:
             prompt: User prompt
@@ -173,6 +223,9 @@ class ClaudeService:
             
         Returns:
             ClaudeResponse with text and usage
+            
+        Raises:
+            BedrockError: On API errors (with user-friendly message)
         """
         messages, system = self._build_messages(prompt, system_prompt, history)
         
@@ -187,27 +240,36 @@ class ClaudeService:
         if system:
             body["system"] = system
         
-        # Invoke model
-        response = self.client.invoke_model(
-            modelId=self.model_id,
-            body=json.dumps(body),
-        )
-        
-        # Parse response
-        result = json.loads(response["body"].read())
-        
-        text = result["content"][0]["text"]
-        usage = TokenUsage(
-            input_tokens=result.get("usage", {}).get("input_tokens", 0),
-            output_tokens=result.get("usage", {}).get("output_tokens", 0),
-        )
-        
-        return ClaudeResponse(
-            text=text,
-            usage=usage,
-            model=self.model_alias,
-            stop_reason=result.get("stop_reason", "end_turn"),
-        )
+        try:
+            # Invoke model with retry
+            response = self.client.invoke_model(
+                modelId=self.model_id,
+                body=json.dumps(body),
+            )
+            
+            # Parse response
+            result = json.loads(response["body"].read())
+            
+            text = result["content"][0]["text"]
+            usage = TokenUsage(
+                input_tokens=result.get("usage", {}).get("input_tokens", 0),
+                output_tokens=result.get("usage", {}).get("output_tokens", 0),
+            )
+            
+            return ClaudeResponse(
+                text=text,
+                usage=usage,
+                model=self.model_alias,
+                stop_reason=result.get("stop_reason", "end_turn"),
+            )
+            
+        except BedrockError:
+            # Re-raise BedrockError as-is
+            raise
+        except Exception as e:
+            # Wrap unexpected errors
+            logger.error(f"Unexpected error in Claude invoke: {type(e).__name__}: {e}")
+            raise create_bedrock_error(e)
 
     
     def invoke_stream(
@@ -219,7 +281,10 @@ class ClaudeService:
         temperature: float = DEFAULT_TEMPERATURE,
     ) -> Generator[StreamChunk, None, None]:
         """
-        Invoke Claude with streaming response.
+        Invoke Claude with streaming response and automatic retry.
+        
+        Note: Retry only applies to initial connection.
+        Stream errors during iteration yield an error chunk.
         
         Args:
             prompt: User prompt
@@ -230,6 +295,9 @@ class ClaudeService:
             
         Yields:
             StreamChunk objects with text fragments
+            
+        Raises:
+            BedrockError: On connection errors (after retries exhausted)
         """
         messages, system = self._build_messages(prompt, system_prompt, history)
         
@@ -244,38 +312,62 @@ class ClaudeService:
         if system:
             body["system"] = system
         
-        # Invoke with streaming
-        response = self.client.invoke_model_with_response_stream(
-            modelId=self.model_id,
-            body=json.dumps(body),
-        )
+        try:
+            # Invoke with streaming (with retry on connection)
+            response = self.client.invoke_model_with_response_stream(
+                modelId=self.model_id,
+                body=json.dumps(body),
+            )
+        except BedrockError:
+            raise
+        except Exception as e:
+            logger.error(f"Error starting stream: {type(e).__name__}: {e}")
+            raise create_bedrock_error(e)
         
-        # Process stream
+        # Process stream with error handling
         usage = TokenUsage()
         
-        for event in response["body"]:
-            chunk = json.loads(event["chunk"]["bytes"])
-            
-            # Handle different event types
-            if chunk["type"] == "content_block_delta":
-                delta = chunk.get("delta", {})
-                if delta.get("type") == "text_delta":
-                    yield StreamChunk(text=delta.get("text", ""))
-            
-            elif chunk["type"] == "message_delta":
-                # Final message with usage stats
-                delta_usage = chunk.get("usage", {})
-                usage.output_tokens = delta_usage.get("output_tokens", 0)
-            
-            elif chunk["type"] == "message_start":
-                # Initial message with input token count
-                message = chunk.get("message", {})
-                msg_usage = message.get("usage", {})
-                usage.input_tokens = msg_usage.get("input_tokens", 0)
-            
-            elif chunk["type"] == "message_stop":
-                # Stream complete
-                yield StreamChunk(text="", is_final=True, usage=usage)
+        try:
+            for event in response["body"]:
+                chunk = json.loads(event["chunk"]["bytes"])
+                
+                # Handle different event types
+                if chunk["type"] == "content_block_delta":
+                    delta = chunk.get("delta", {})
+                    if delta.get("type") == "text_delta":
+                        yield StreamChunk(text=delta.get("text", ""))
+                
+                elif chunk["type"] == "message_delta":
+                    # Final message with usage stats
+                    delta_usage = chunk.get("usage", {})
+                    usage.output_tokens = delta_usage.get("output_tokens", 0)
+                
+                elif chunk["type"] == "message_start":
+                    # Initial message with input token count
+                    message = chunk.get("message", {})
+                    msg_usage = message.get("usage", {})
+                    usage.input_tokens = msg_usage.get("input_tokens", 0)
+                
+                elif chunk["type"] == "message_stop":
+                    # Stream complete
+                    yield StreamChunk(text="", is_final=True, usage=usage)
+                    
+        except (ClientError, BotoCoreError) as e:
+            # Stream error - yield error chunk and stop
+            logger.error(f"Stream error: {type(e).__name__}: {e}")
+            bedrock_error = create_bedrock_error(e)
+            yield StreamChunk(
+                text=f"\n\n[Error: {bedrock_error.user_message}]",
+                is_final=True,
+                usage=usage,
+            )
+        except Exception as e:
+            logger.error(f"Unexpected stream error: {type(e).__name__}: {e}")
+            yield StreamChunk(
+                text="\n\n[Error: An unexpected error occurred. Please try again.]",
+                is_final=True,
+                usage=usage,
+            )
     
     def invoke_with_context(
         self,
@@ -362,15 +454,70 @@ Be concise and accurate."""
                 temperature=0,
             )
             return len(response.text) > 0
+        except BedrockError as e:
+            logger.error(f"Claude health check failed: {e.user_message}")
+            return False
         except Exception as e:
             logger.error(f"Claude health check failed: {e}")
             return False
+    
+    def invoke_safe(
+        self,
+        prompt: str,
+        system_prompt: Optional[str] = None,
+        history: Optional[List[Dict[str, str]]] = None,
+        max_tokens: int = DEFAULT_MAX_TOKENS,
+        temperature: float = DEFAULT_TEMPERATURE,
+        fallback_message: str = "I'm sorry, I couldn't process your request. Please try again.",
+    ) -> ClaudeResponse:
+        """
+        Invoke Claude with graceful error handling.
+        
+        Returns a fallback response instead of raising on error.
+        Useful for user-facing endpoints.
+        
+        Args:
+            prompt: User prompt
+            system_prompt: Optional system prompt
+            history: Optional conversation history
+            max_tokens: Maximum output tokens
+            temperature: Sampling temperature
+            fallback_message: Message to return on error
+            
+        Returns:
+            ClaudeResponse (may contain fallback message on error)
+        """
+        try:
+            return self.invoke(
+                prompt=prompt,
+                system_prompt=system_prompt,
+                history=history,
+                max_tokens=max_tokens,
+                temperature=temperature,
+            )
+        except BedrockError as e:
+            logger.error(f"Claude invoke failed: {e.error_type.value} - {e.message}")
+            return ClaudeResponse(
+                text=e.user_message,
+                usage=TokenUsage(),
+                model=self.model_alias,
+                stop_reason="error",
+            )
+        except Exception as e:
+            logger.error(f"Unexpected error in Claude invoke: {e}")
+            return ClaudeResponse(
+                text=fallback_message,
+                usage=TokenUsage(),
+                model=self.model_alias,
+                stop_reason="error",
+            )
 
 
 # Convenience function
 def create_claude_service(
     region_name: str = "ap-southeast-1",
     model: str = "sonnet",
+    max_retries: int = 5,
 ) -> ClaudeService:
     """Create Claude service instance."""
-    return ClaudeService(region_name=region_name, model=model)
+    return ClaudeService(region_name=region_name, model=model, max_retries=max_retries)
