@@ -24,11 +24,12 @@ class DocumentStatus(str, Enum):
 
 
 # Valid status transitions
+# FAILED can transition to IDP_RUNNING for retry support
 VALID_TRANSITIONS = {
     DocumentStatus.UPLOADED: [DocumentStatus.IDP_RUNNING, DocumentStatus.FAILED],
     DocumentStatus.IDP_RUNNING: [DocumentStatus.EMBEDDING_DONE, DocumentStatus.FAILED],
-    DocumentStatus.EMBEDDING_DONE: [],  # Terminal state
-    DocumentStatus.FAILED: [],  # Terminal state
+    DocumentStatus.EMBEDDING_DONE: [],  # Terminal state - no changes allowed
+    DocumentStatus.FAILED: [DocumentStatus.IDP_RUNNING, DocumentStatus.UPLOADED],  # Allow retry
 }
 
 
@@ -129,7 +130,8 @@ class DocumentStatusManager:
         new_status: DocumentStatus,
         page_count: Optional[int] = None,
         chunk_count: Optional[int] = None,
-        error_message: Optional[str] = None
+        error_message: Optional[str] = None,
+        validate_transition: bool = True
     ) -> dict:
         """
         Update document status with optional metadata.
@@ -140,6 +142,7 @@ class DocumentStatusManager:
             page_count: Number of pages (for EMBEDDING_DONE)
             chunk_count: Number of chunks (for EMBEDDING_DONE)
             error_message: Error details (for FAILED)
+            validate_transition: If True, validate status transition is allowed
             
         Returns:
             dict: Updated document record
@@ -150,6 +153,29 @@ class DocumentStatusManager:
             
         Requirements: 9.2, 9.3, 9.4
         """
+        # Validate status transition if enabled
+        if validate_transition:
+            current_doc = self.get_document(doc_id)
+            if current_doc:
+                current_status_str = current_doc.get("status", "")
+                try:
+                    current_status = DocumentStatus(current_status_str)
+                    allowed_transitions = VALID_TRANSITIONS.get(current_status, [])
+                    
+                    if new_status not in allowed_transitions:
+                        # Allow same status (idempotent)
+                        if current_status == new_status:
+                            return current_doc
+                        raise ValueError(
+                            f"Invalid status transition: {current_status.value} → {new_status.value}. "
+                            f"Allowed: {[s.value for s in allowed_transitions]}"
+                        )
+                except ValueError as e:
+                    if "Invalid status transition" in str(e):
+                        raise
+                    # Unknown current status, allow update
+                    pass
+        
         # Build update expression dynamically
         update_parts = ["#status = :new_status", "#updated_at = :updated_at"]
         expression_names = {

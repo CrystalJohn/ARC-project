@@ -123,6 +123,10 @@ def get_rag_service() -> RAGService:
             qdrant_port=6333,
             region_name="ap-southeast-1",
             model="sonnet",
+            use_hybrid=False,  # Disable hybrid for now - vector-only works well
+            # TODO: Debug hybrid search initialization issue
+            # bm25_weight=0.3,
+            # vector_weight=0.7,
         )
     return _rag_service
 

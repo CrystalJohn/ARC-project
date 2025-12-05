@@ -31,6 +31,7 @@ class ProcessingStatus(str, Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     SKIPPED = "skipped"  # For scanned PDFs when Textract not available
+    ALREADY_DONE = "already_done"  # Idempotency - already processed
 
 
 @dataclass
@@ -104,10 +105,22 @@ class SQSWorker:
         self.store_vectors_callback = store_vectors_callback
         self.update_status_callback = update_status_callback
         
+        # Callback to check document status (for idempotency)
+        self.get_status_callback: Optional[Callable[[str], Optional[str]]] = None
+        
+        # Callback to acquire processing lock (for race condition prevention)
+        self.acquire_lock_callback: Optional[Callable[[str, str], bool]] = None
+        
         # Worker state
         self.running = False
         self.processed_count = 0
         self.error_count = 0
+        self.skipped_count = 0
+        
+        # Worker ID for distributed locking
+        import uuid
+        self.worker_id = str(uuid.uuid4())[:8]
+        logger.info(f"Worker ID: {self.worker_id}")
     
     def start(self, max_iterations: Optional[int] = None):
         """
@@ -146,7 +159,7 @@ class SQSWorker:
                 self.error_count += 1
                 time.sleep(5)  # Back off on error
         
-        logger.info(f"Worker stopped. Processed: {self.processed_count}, Errors: {self.error_count}")
+        logger.info(f"Worker stopped. Processed: {self.processed_count}, Skipped: {self.skipped_count}, Errors: {self.error_count}")
     
     def stop(self):
         """Stop worker loop."""
@@ -187,7 +200,28 @@ class SQSWorker:
             
             logger.info(f"Processing document: {document_id} from s3://{bucket}/{key}")
             
-            # Update status to PROCESSING
+            # IDEMPOTENCY CHECK: Skip if already processed, allow retry from FAILED
+            if self.get_status_callback:
+                current_status = self.get_status_callback(document_id)
+                if current_status in ["EMBEDDING_DONE", "completed"]:
+                    logger.info(f"Document {document_id} already processed (status={current_status}), skipping")
+                    self._delete_message(receipt_handle)
+                    self.skipped_count += 1
+                    return
+                elif current_status == "FAILED":
+                    # Allow retry from FAILED state - reset to allow processing
+                    logger.info(f"Document {document_id} was FAILED, retrying...")
+            
+            # RACE CONDITION PREVENTION: Try to acquire lock
+            if self.acquire_lock_callback:
+                lock_acquired = self.acquire_lock_callback(document_id, self.worker_id)
+                if not lock_acquired:
+                    logger.info(f"Document {document_id} is being processed by another worker, skipping")
+                    # Don't delete message - let it become visible again for retry
+                    self.skipped_count += 1
+                    return
+            
+            # Update status to PROCESSING (valid from UPLOADED, IDP_RUNNING, or FAILED)
             self._update_status(document_id, ProcessingStatus.PROCESSING)
             
             # Process the document
@@ -361,15 +395,31 @@ class SQSWorker:
             # 6. Store vectors (if callback provided)
             if self.store_vectors_callback and vectors:
                 logger.info("Storing vectors...")
-                chunk_texts = [c.text for c in chunks]
+                
+                # Build chunk data with page info
+                chunk_data = []
+                for i, chunk in enumerate(chunks):
+                    # Estimate page from character position
+                    # Assume ~3000 chars per page for digital PDFs
+                    estimated_page = (chunk.start_char // 3000) + 1 if chunk.start_char > 0 else 1
+                    estimated_page = min(estimated_page, pdf_content.total_pages)
+                    
+                    chunk_data.append({
+                        "text": chunk.text,
+                        "page": estimated_page,
+                        "is_table": chunk.is_table,
+                        "chunk_index": i
+                    })
+                
                 metadata = {
                     "document_id": document_id,
                     "bucket": bucket,
                     "key": key,
                     "total_pages": pdf_content.total_pages,
-                    "pdf_metadata": pdf_content.metadata
+                    "pdf_metadata": pdf_content.metadata,
+                    "chunk_data": chunk_data  # Include page info
                 }
-                self.store_vectors_callback(document_id, chunk_texts, vectors, metadata)
+                self.store_vectors_callback(document_id, chunk_data, vectors, metadata)
             
             return ProcessingResult(
                 document_id=document_id,
