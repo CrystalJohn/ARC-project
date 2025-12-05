@@ -170,4 +170,8 @@ class AuthService {
   }
 }
 
-export default new AuthService()
+// Export as named export for consistency
+export const authService = new AuthService()
+
+// Also export as default for backward compatibility
+export default authService

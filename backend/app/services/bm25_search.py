@@ -56,16 +56,20 @@ class BM25Index:
         self.b = b
         
         # Index data
-        self.documents: Dict[str, Dict] = {}  # chunk_id -> {text, tokens, doc_id, metadata}
+        self.documents: Dict[str, Dict] = {}  # chunk_id -> {text, doc_id, metadata}
         self.doc_lengths: Dict[str, int] = {}  # chunk_id -> token count
         self.avg_doc_length: float = 0
         self.doc_count: int = 0
+        self.total_length: int = 0  # Running total for O(1) avg calculation
         
         # Inverted index: term -> {chunk_id: term_frequency}
         self.inverted_index: Dict[str, Dict[str, int]] = {}
         
         # Document frequency: term -> number of docs containing term
         self.doc_freq: Dict[str, int] = {}
+        
+        # IDF cache: term -> pre-computed IDF score
+        self.idf_cache: Dict[str, float] = {}
     
     def tokenize(self, text: str) -> List[str]:
         """
@@ -101,7 +105,8 @@ class BM25Index:
         chunk_id: str,
         text: str,
         doc_id: str = "",
-        metadata: Optional[Dict] = None
+        metadata: Optional[Dict] = None,
+        defer_stats: bool = False
     ) -> None:
         """
         Add a document (chunk) to the index.
@@ -111,13 +116,13 @@ class BM25Index:
             text: Text content
             doc_id: Parent document ID
             metadata: Additional metadata
+            defer_stats: If True, skip avg_doc_length calculation (for batch operations)
         """
         tokens = self.tokenize(text)
         
-        # Store document
+        # Store document (tokens not stored - already in inverted_index)
         self.documents[chunk_id] = {
             "text": text,
-            "tokens": tokens,
             "doc_id": doc_id,
             "metadata": metadata or {}
         }
@@ -125,10 +130,14 @@ class BM25Index:
         # Update document length
         self.doc_lengths[chunk_id] = len(tokens)
         self.doc_count += 1
+        self.total_length += len(tokens)
         
-        # Update average document length
-        total_length = sum(self.doc_lengths.values())
-        self.avg_doc_length = total_length / self.doc_count if self.doc_count > 0 else 0
+        # Update average document length - O(1) instead of O(n)
+        # Skip if defer_stats=True (for batch operations)
+        if not defer_stats:
+            self.avg_doc_length = self.total_length / self.doc_count
+            # Update IDF cache for single document add
+            self._update_idf_cache()
         
         # Count term frequencies
         term_freq = Counter(tokens)
@@ -149,29 +158,46 @@ class BM25Index:
         documents: List[Dict]
     ) -> None:
         """
-        Add multiple documents to the index.
+        Add multiple documents to the index (optimized batch operation).
         
         Args:
             documents: List of {chunk_id, text, doc_id, metadata}
         """
+        # Batch add with deferred stats calculation
         for doc in documents:
             self.add_document(
                 chunk_id=doc.get("chunk_id", str(len(self.documents))),
                 text=doc["text"],
                 doc_id=doc.get("doc_id", ""),
-                metadata=doc.get("metadata", {})
+                metadata=doc.get("metadata", {}),
+                defer_stats=True  # Defer avg calculation
             )
+        
+        # Calculate average once at the end - O(1) instead of O(n)
+        if self.doc_count > 0:
+            self.avg_doc_length = self.total_length / self.doc_count
+        
+        # Pre-compute IDF cache for fast search
+        self._update_idf_cache()
         
         logger.info(f"Indexed {len(documents)} documents. Total: {self.doc_count}")
     
+    def _update_idf_cache(self) -> None:
+        """
+        Pre-compute IDF scores for all terms.
+        Called after batch indexing to eliminate log() calculations during search.
+        """
+        self.idf_cache.clear()
+        for term, df in self.doc_freq.items():
+            # IDF formula with smoothing
+            self.idf_cache[term] = math.log((self.doc_count - df + 0.5) / (df + 0.5) + 1)
+    
     def _idf(self, term: str) -> float:
-        """Calculate IDF (Inverse Document Frequency) for a term."""
-        if term not in self.doc_freq:
-            return 0
-        
-        df = self.doc_freq[term]
-        # IDF formula with smoothing
-        return math.log((self.doc_count - df + 0.5) / (df + 0.5) + 1)
+        """
+        Get pre-computed IDF (Inverse Document Frequency) for a term.
+        Returns cached value for O(1) lookup.
+        """
+        return self.idf_cache.get(term, 0.0)
     
     def _score_document(self, chunk_id: str, query_tokens: List[str]) -> float:
         """Calculate BM25 score for a document given query tokens."""
@@ -250,14 +276,25 @@ class BM25Index:
         
         return results[:top_k]
     
+    def get_tokens(self, chunk_id: str) -> List[str]:
+        """
+        Reconstruct tokens from document text.
+        Helper method if tokens are needed after indexing.
+        """
+        if chunk_id not in self.documents:
+            return []
+        return self.tokenize(self.documents[chunk_id]["text"])
+    
     def clear(self) -> None:
         """Clear the index."""
         self.documents.clear()
         self.doc_lengths.clear()
         self.inverted_index.clear()
         self.doc_freq.clear()
+        self.idf_cache.clear()
         self.avg_doc_length = 0
         self.doc_count = 0
+        self.total_length = 0
 
 
 class HybridRetriever:

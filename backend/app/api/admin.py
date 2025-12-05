@@ -225,6 +225,55 @@ async def list_documents(
     )
 
 
+@router.get("/documents/{doc_id}/download")
+async def download_document(doc_id: str):
+    """
+    Generate presigned URL for document download.
+    
+    Returns a temporary URL (valid for 1 hour) to download the PDF.
+    
+    Task #37: Display citations with document links
+    """
+    try:
+        # Get document info to verify it exists
+        status_manager = get_status_manager()
+        doc = status_manager.get_document(doc_id)
+        
+        if not doc:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Document {doc_id} not found"
+            )
+        
+        # Generate presigned URL
+        s3_client = get_s3_client()
+        s3_key = f"uploads/{doc_id}/{doc['filename']}"
+        
+        presigned_url = s3_client.generate_presigned_url(
+            'get_object',
+            Params={
+                'Bucket': S3_BUCKET,
+                'Key': s3_key
+            },
+            ExpiresIn=3600  # 1 hour
+        )
+        
+        return {
+            "doc_id": doc_id,
+            "filename": doc["filename"],
+            "download_url": presigned_url,
+            "expires_in": 3600
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to generate download URL: {str(e)}"
+        )
+
+
 @router.get("/documents/{doc_id}")
 async def get_document(doc_id: str):
     """

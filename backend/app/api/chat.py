@@ -263,7 +263,6 @@ async def chat(request: ChatRequest, response: Response):
             search_filter=search_filter,
             history=history,
             stream=False,
-            user_id=user_id,
         )
         
         # Save assistant response to history

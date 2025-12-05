@@ -22,6 +22,7 @@ from app.services.bedrock_retry import (
     classify_error,
     BedrockErrorType,
 )
+from app.services.monitoring_service import track_embedding_metrics
 
 logger = logging.getLogger(__name__)
 
@@ -43,10 +44,25 @@ class CohereEmbeddingService:
     def __init__(
         self,
         region: str = "ap-southeast-1",
+        region_name: str = None,  # Alias for backward compatibility
         max_retries: int = 5,
         base_delay: float = 1.0,
         max_delay: float = 60.0,
     ):
+        """
+        Initialize Cohere Embedding Service.
+        
+        Args:
+            region: AWS region (preferred parameter)
+            region_name: AWS region (alias for compatibility)
+            max_retries: Maximum number of retry attempts
+            base_delay: Initial delay between retries (seconds)
+            max_delay: Maximum delay between retries (seconds)
+        """
+        # Support both region and region_name parameters
+        if region_name is not None:
+            region = region_name
+        
         """
         Initialize embedding service.
         
@@ -171,6 +187,7 @@ class CohereEmbeddingService:
             return []
         
         all_embeddings = []
+        start_time = time.time()
         
         # Process in batches of BATCH_SIZE
         for i in range(0, len(texts), self.BATCH_SIZE):
@@ -180,6 +197,7 @@ class CohereEmbeddingService:
             
             # Truncate texts if too long
             batch = [t[:2000] if len(t) > 2000 else t for t in batch]
+            batch_start = time.time()
             
             try:
                 body = json.dumps({
@@ -191,14 +209,23 @@ class CohereEmbeddingService:
                 embeddings = result.get("embeddings", [])
                 all_embeddings.extend(embeddings)
                 
+                # Track metrics for successful batch
+                batch_latency_ms = (time.time() - batch_start) * 1000
+                track_embedding_metrics(len(batch), batch_latency_ms, success=True)
+                
                 logger.debug(f"Embedded batch {batch_num}/{total_batches} ({len(batch)} texts)")
                 
             except BedrockError as e:
                 logger.error(f"Bedrock error in batch {batch_num}: {e.error_type.value} - {e.message}")
+                # Track metrics for failed batch
+                batch_latency_ms = (time.time() - batch_start) * 1000
+                track_embedding_metrics(len(batch), batch_latency_ms, success=False)
                 # Return None for failed batch
                 all_embeddings.extend([None] * len(batch))
             except Exception as e:
                 logger.error(f"Unexpected error in batch {batch_num}: {e}")
+                batch_latency_ms = (time.time() - batch_start) * 1000
+                track_embedding_metrics(len(batch), batch_latency_ms, success=False)
                 all_embeddings.extend([None] * len(batch))
         
         return all_embeddings

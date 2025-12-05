@@ -101,3 +101,8 @@ amplifyconfiguration*
 *.njsproj
 *.sln
 *.sw?
+
+start-dev.sh
+test-local-bedrock.py
+TESTING_READY.md
+/docs
