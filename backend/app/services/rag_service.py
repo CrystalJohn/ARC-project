@@ -440,8 +440,8 @@ class RAGService:
     def retrieve_contexts(
         self,
         query: str,
-        top_k: int = 8,  # ✅ FIX #4: Increased from 5 to 8
-        score_threshold: float = 0.5,  # ✅ Already fixed by user
+        top_k: int = 10,  # ✅ OPTIMIZED: Increased to 10 for table-heavy documents
+        score_threshold: float = 0.4,  # ✅ OPTIMIZED: Lowered to 0.4 for better recall with tables
         search_filter: Optional[SearchFilter] = None,
     ) -> List[RAGContext]:
         """
@@ -450,10 +450,15 @@ class RAGService:
         Uses Hybrid Retrieval (BM25 + Vector) if enabled.
         With adaptive weighting for technical queries.
         
+        OPTIMIZED FOR TABLE-HEAVY DOCUMENTS:
+        - top_k=10 ensures full table rows are captured
+        - score_threshold=0.4 balances precision/recall for structured data
+        - Larger chunks (500 tokens) prevent table splitting
+        
         Args:
             query: User query
-            top_k: Number of contexts to retrieve (default 8)
-            score_threshold: Minimum relevance score (default 0.5)
+            top_k: Number of contexts to retrieve (default 10, optimized for tables)
+            score_threshold: Minimum relevance score (default 0.4, balanced for tables)
             search_filter: Optional filter for documents
             
         Returns:
@@ -643,12 +648,12 @@ class RAGService:
             temperature=temperature,
         )
     
-    # ✅ FIX #4: UPDATED DEFAULT PARAMETERS
+    # ✅ OPTIMIZED FOR TABLE-HEAVY DOCUMENTS
     def query(
         self,
         query: str,
-        top_k: int = 8,  # ✅ Increased from 5 to 8
-        score_threshold: float = 0.3,  # ✅ Lowered back to 0.3 for better recall
+        top_k: int = 10,  # ✅ OPTIMIZED: Increased to 10 for better table coverage
+        score_threshold: float = 0.4,  # ✅ OPTIMIZED: Balanced threshold for tables
         search_filter: Optional[SearchFilter] = None,
         history: Optional[List[Dict[str, str]]] = None,
         max_tokens: int = 2048,
@@ -658,10 +663,15 @@ class RAGService:
         """
         Complete RAG query: retrieve + generate.
         
+        OPTIMIZED FOR TABLE-HEAVY DOCUMENTS:
+        - Increased top_k to 10 for better table coverage
+        - Balanced score_threshold at 0.4 for recall/precision
+        - Larger chunks preserve table structure
+        
         Args:
             query: User query
-            top_k: Number of contexts to retrieve (default 8, increased from 5)
-            score_threshold: Minimum relevance score (default 0.5, increased from 0.3)
+            top_k: Number of contexts to retrieve (default 10, optimized for tables)
+            score_threshold: Minimum relevance score (default 0.4, balanced for tables)
             search_filter: Optional document filter
             history: Optional conversation history
             max_tokens: Maximum output tokens

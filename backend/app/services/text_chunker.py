@@ -36,10 +36,11 @@ class TableData:
 
 # Default settings
 # Cohere embed model has 2048 char limit, so chunk_size * CHARS_PER_TOKEN < 2048
-DEFAULT_CHUNK_SIZE = 400       # tokens (~1600 chars, safe for Cohere 2048 limit)
-DEFAULT_OVERLAP = 50           # tokens
+# OPTIMIZED FOR DOCUMENTS WITH TABLES AND COMPLEX STRUCTURES
+DEFAULT_CHUNK_SIZE = 500       # tokens (~2000 chars) - Increased for tables
+DEFAULT_OVERLAP = 100          # tokens - Increased to preserve table context
 CHARS_PER_TOKEN = 4            # Ước tính trung bình
-DEFAULT_TABLE_ROWS_PER_CHUNK = 5  # Số rows mỗi table chunk
+DEFAULT_TABLE_ROWS_PER_CHUNK = 10  # Increased from 5 to 10 for better table context
 
 
 def chunk_text(
