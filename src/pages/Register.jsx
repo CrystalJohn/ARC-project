@@ -1,61 +1,44 @@
-import { useState, useEffect } from 'react'
-import { useNavigate, useLocation } from 'react-router-dom'
+import { useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { motion } from 'framer-motion'
 import authService from '../services/authService'
 
-function LoginPage() {
+function Register() {
   const [email, setEmail] = useState('')
+  const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [showPassword, setShowPassword] = useState(false)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
+  const [success, setSuccess] = useState('')
   const navigate = useNavigate()
-  const location = useLocation()
 
-  // Get message from navigation state (e.g., session expired)
-  const stateMessage = location.state?.message
-
-  // Check if user is already logged in and redirect based on role
-  useEffect(() => {
-    const checkAuth = async () => {
-      if (authService.isAuthenticated()) {
-        const user = await authService.getCurrentUser()
-        if (user) {
-          // User is already logged in, redirect based on role
-          const isAdmin = user.groups?.includes('admin')
-          if (isAdmin) {
-            navigate('/admin', { replace: true })
-          } else {
-            navigate('/chat', { replace: true })
-          }
-        }
-      }
-    }
-    checkAuth()
-  }, [navigate])
-
-  const handleLogin = async (e) => {
+  const handleRegister = async (e) => {
     e.preventDefault()
     setError('')
+    setSuccess('')
     setLoading(true)
-
+    
     try {
-      // Logout any existing session first
-      await authService.logout()
+      const result = await authService.register(email, username, password)
       
-      // Then login with new credentials
-      const result = await authService.login(email, password)
-      console.log('Login successful:', result)
-      
-      // Redirect based on user role
-      const isAdmin = result.groups?.includes('admin')
-      if (isAdmin) {
-        navigate('/admin', { replace: true })
+      if (result.success) {
+        setSuccess(result.message)
+        // Redirect to login after 2 seconds
+        setTimeout(() => {
+          navigate('/login', { 
+            state: { 
+              message: result.requiresVerification 
+                ? 'Please verify your email before logging in.' 
+                : 'Registration successful! You can now login.'
+            } 
+          })
+        }, 2000)
       } else {
-        navigate('/chat', { replace: true })
+        setError(result.message)
       }
     } catch (err) {
-      console.error('Login failed:', err)
+      console.error('Registration failed:', err)
       setError(err.message)
     } finally {
       setLoading(false)
@@ -75,19 +58,19 @@ function LoginPage() {
         {/* Toggle Switch */}
         <div className="flex justify-center mb-8">
           <div className="bg-blue-50 p-1 rounded-full flex w-64 relative">
+            {/* The sliding background for the active tab */}
             <motion.div 
-              className="absolute left-1 top-1 bottom-1 w-[calc(50%-4px)] bg-slate-500 rounded-full shadow-sm z-0"
+              className="absolute right-1 top-1 bottom-1 w-[calc(50%-4px)] bg-slate-500 rounded-full shadow-sm z-0"
               layoutId="activeTab"
-              transition={{ type: "spring", stiffness: 300, damping: 30 }}
             />
             <button 
-              className="flex-1 py-2 text-sm font-medium rounded-full z-10 text-white relative transition-colors"
+              onClick={() => navigate('/login')}
+              className="flex-1 py-2 text-sm font-medium rounded-full z-10 text-slate-500 relative transition-colors hover:text-slate-700"
             >
               Login
             </button>
             <button 
-              onClick={() => navigate('/register')}
-              className="flex-1 py-2 text-sm font-medium rounded-full z-10 text-slate-500 relative transition-colors hover:text-slate-700"
+              className="flex-1 py-2 text-sm font-medium rounded-full z-10 text-white relative transition-colors"
             >
               Register
             </button>
@@ -95,17 +78,17 @@ function LoginPage() {
         </div>
 
         <p className="text-center text-gray-500 text-sm mb-8 px-4">
-          Sign in to access your intelligent research assistant and manage your documents.
+          Create an account to access your intelligent research assistant and manage your documents.
         </p>
         
-        {/* State message (e.g., session expired) */}
-        {stateMessage && (
+        {/* Success message */}
+        {success && (
           <motion.div 
             initial={{ opacity: 0, height: 0 }}
             animate={{ opacity: 1, height: 'auto' }}
-            className="mb-4 p-3 bg-blue-50 border border-blue-200 rounded-2xl text-sm text-blue-800"
+            className="mb-4 p-3 bg-green-50 border border-green-200 rounded-2xl text-sm text-green-800"
           >
-            {stateMessage}
+            {success}
           </motion.div>
         )}
 
@@ -120,7 +103,7 @@ function LoginPage() {
           </motion.div>
         )}
         
-        <form onSubmit={handleLogin} className="space-y-6">
+        <form onSubmit={handleRegister} className="space-y-6">
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-2 ml-1">
               Email Address
@@ -131,6 +114,20 @@ function LoginPage() {
               onChange={(e) => setEmail(e.target.value)}
               className="w-full px-4 py-3 border border-gray-300 rounded-full focus:outline-none focus:ring-2 focus:ring-blue-200 focus:border-blue-400 transition-all text-gray-700 placeholder-gray-400"
               placeholder="Enter your Email Address"
+              required
+            />
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2 ml-1">
+              User name
+            </label>
+            <input
+              type="text"
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+              className="w-full px-4 py-3 border border-gray-300 rounded-full focus:outline-none focus:ring-2 focus:ring-blue-200 focus:border-blue-400 transition-all text-gray-700 placeholder-gray-400"
+              placeholder="Enter your User name"
               required
             />
           </div>
@@ -161,44 +158,26 @@ function LoginPage() {
               </button>
             </div>
           </div>
-
-          <div className="flex items-center justify-between px-1">
-            <div className="flex items-center">
-              <input
-                id="remember-me"
-                name="remember-me"
-                type="checkbox"
-                className="h-4 w-4 text-slate-600 focus:ring-slate-500 border-gray-300 rounded"
-              />
-              <label htmlFor="remember-me" className="ml-2 block text-sm text-gray-600">
-                Remember me
-              </label>
-            </div>
-
-            <div className="text-sm">
-              <a href="#" className="font-medium text-gray-600 hover:text-gray-900">
-                Forgot Password?
-              </a>
-            </div>
-          </div>
           
-          <motion.button
-            whileHover={{ scale: 1.02 }}
-            whileTap={{ scale: 0.98 }}
-            type="submit"
-            disabled={loading}
-            className={`w-full py-3 rounded-full text-slate-700 font-medium transition-colors shadow-sm ${
-              loading
-                ? 'bg-blue-100 cursor-not-allowed'
-                : 'bg-blue-100 hover:bg-blue-200'
-            }`}
-          >
-            {loading ? 'Signing in...' : 'Login'}
-          </motion.button>
+          <div className="pt-4">
+            <motion.button
+              whileHover={{ scale: 1.02 }}
+              whileTap={{ scale: 0.98 }}
+              type="submit"
+              disabled={loading}
+              className={`w-full py-3 rounded-full text-slate-700 font-medium transition-colors shadow-sm ${
+                loading
+                  ? 'bg-blue-100 cursor-not-allowed'
+                  : 'bg-blue-100 hover:bg-blue-200'
+              }`}
+            >
+              {loading ? 'Creating Account...' : 'Register'}
+            </motion.button>
+          </div>
         </form>
       </motion.div>
     </div>
   )
 }
 
-export default LoginPage
+export default Register

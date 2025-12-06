@@ -146,6 +146,77 @@ class AuthService {
   }
 
   /**
+   * Register new user (Cognito sign up)
+   * @param {string} email 
+   * @param {string} username 
+   * @param {string} password 
+   * @returns {Promise<{success: boolean, message: string}>}
+   */
+  async register(email, username, password) {
+    try {
+      // Import signUp dynamically to avoid circular dependency
+      const { signUp } = await import('aws-amplify/auth')
+      
+      const { isSignUpComplete, userId, nextStep } = await signUp({
+        username: email,
+        password: password,
+        options: {
+          userAttributes: {
+            email: email,
+            preferred_username: username,
+          },
+          autoSignIn: false, // Don't auto sign in after registration
+        }
+      })
+
+      if (isSignUpComplete) {
+        return {
+          success: true,
+          message: 'Registration successful! Please check your email to verify your account.',
+          requiresVerification: false,
+        }
+      } else if (nextStep.signUpStep === 'CONFIRM_SIGN_UP') {
+        return {
+          success: true,
+          message: 'Registration successful! Please check your email for verification code.',
+          requiresVerification: true,
+        }
+      } else {
+        return {
+          success: false,
+          message: 'Registration incomplete. Next step: ' + nextStep.signUpStep,
+        }
+      }
+    } catch (error) {
+      console.error('Registration error:', error)
+      throw new Error(this._getRegistrationErrorMessage(error))
+    }
+  }
+
+  /**
+   * Get user-friendly registration error message
+   * @private
+   */
+  _getRegistrationErrorMessage(error) {
+    const errorCode = error.name || error.code
+
+    switch (errorCode) {
+      case 'UsernameExistsException':
+        return 'This email is already registered. Please login instead.'
+      case 'InvalidPasswordException':
+        return 'Password must be at least 8 characters with uppercase, lowercase, number and special character.'
+      case 'InvalidParameterException':
+        return 'Invalid email or password format.'
+      case 'TooManyRequestsException':
+        return 'Too many registration attempts. Please try again later.'
+      case 'NetworkError':
+        return 'Network error. Please check your connection.'
+      default:
+        return error.message || 'Registration failed. Please try again.'
+    }
+  }
+
+  /**
    * Get user-friendly error message
    * @private
    */

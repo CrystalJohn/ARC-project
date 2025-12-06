@@ -1,49 +1,58 @@
 import { useState, useEffect } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { adminService } from '../services/adminService'
+import { authService } from '../services/authService'
+import { 
+  Card, 
+  CardBody, 
+  Chip, 
+  Progress,
+  Checkbox,
+  Spinner,
+  Pagination
+} from '@heroui/react'
+import { motion, AnimatePresence } from 'framer-motion'
 
 function AdminPage() {
+  const navigate = useNavigate()
   const [documents, setDocuments] = useState([])
   const [dragActive, setDragActive] = useState(false)
   const [uploading, setUploading] = useState(false)
   const [uploadProgress, setUploadProgress] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
-  const [statusFilter, setStatusFilter] = useState(null)
+  const [statusFilter, setStatusFilter] = useState('all')
   const [page, setPage] = useState(1)
   const [totalPages, setTotalPages] = useState(1)
+  const [totalDocs, setTotalDocs] = useState(0)
   const [autoRefresh, setAutoRefresh] = useState(true)
+  const [activeMenu, setActiveMenu] = useState('documents')
 
-  // Fetch documents on mount and when filters change
   useEffect(() => {
     fetchDocuments()
   }, [page, statusFilter])
 
-  // Auto-refresh every 5 seconds if enabled
   useEffect(() => {
     if (!autoRefresh) return
-    
-    const interval = setInterval(() => {
-      fetchDocuments(true) // Silent refresh
-    }, 5000)
-    
+    const interval = setInterval(() => fetchDocuments(true), 5000)
     return () => clearInterval(interval)
   }, [autoRefresh, page, statusFilter])
+
+  const PAGE_SIZE = 5 // Mỗi trang tối đa 5 dòng
 
   const fetchDocuments = async (silent = false) => {
     try {
       if (!silent) setLoading(true)
       setError(null)
-      
       const data = await adminService.listDocuments({
         page,
-        pageSize: 20,
-        status: statusFilter
+        pageSize: PAGE_SIZE,
+        status: statusFilter === 'all' ? null : statusFilter
       })
-      
       setDocuments(data.items)
-      setTotalPages(Math.ceil(data.total / data.page_size))
+      setTotalPages(Math.ceil(data.total / PAGE_SIZE))
+      setTotalDocs(data.total)
     } catch (err) {
-      console.error('Error fetching documents:', err)
       if (!silent) setError(err.message)
     } finally {
       if (!silent) setLoading(false)
@@ -53,383 +62,308 @@ function AdminPage() {
   const handleDrag = (e) => {
     e.preventDefault()
     e.stopPropagation()
-    if (e.type === 'dragenter' || e.type === 'dragover') {
-      setDragActive(true)
-    } else if (e.type === 'dragleave') {
-      setDragActive(false)
-    }
+    if (e.type === 'dragenter' || e.type === 'dragover') setDragActive(true)
+    else if (e.type === 'dragleave') setDragActive(false)
   }
 
   const handleDrop = (e) => {
     e.preventDefault()
     e.stopPropagation()
     setDragActive(false)
-    
-    const files = Array.from(e.dataTransfer.files)
-    handleFiles(files)
+    handleFiles(Array.from(e.dataTransfer.files))
   }
 
   const handleFileInput = (e) => {
-    const files = Array.from(e.target.files)
-    handleFiles(files)
-    e.target.value = '' // Reset input
+    handleFiles(Array.from(e.target.files))
+    e.target.value = ''
   }
 
   const handleFiles = async (files) => {
-    // Filter only PDF files
-    const pdfFiles = files.filter(file => file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf'))
-    
-    if (pdfFiles.length === 0) {
-      alert('Please select PDF files only')
-      return
-    }
-
-    if (pdfFiles.length !== files.length) {
-      alert(`${files.length - pdfFiles.length} non-PDF file(s) were skipped`)
-    }
+    const pdfFiles = files.filter(f => f.type === 'application/pdf' || f.name.toLowerCase().endsWith('.pdf'))
+    if (pdfFiles.length === 0) return alert('Please select PDF files only')
 
     setUploading(true)
-    const progress = pdfFiles.map(file => ({
-      filename: file.name,
-      status: 'uploading',
-      progress: 0
-    }))
-    setUploadProgress(progress)
+    setUploadProgress(pdfFiles.map(f => ({ filename: f.name, size: f.size, status: 'uploading', progress: 0 })))
 
-    // Upload files sequentially
     for (let i = 0; i < pdfFiles.length; i++) {
-      const file = pdfFiles[i]
-      
       try {
-        // Update progress
-        setUploadProgress(prev => prev.map((p, idx) => 
-          idx === i ? { ...p, status: 'uploading', progress: 50 } : p
-        ))
-
-        const result = await adminService.uploadDocument(file)
-        
-        // Update progress - success
-        setUploadProgress(prev => prev.map((p, idx) => 
-          idx === i ? { ...p, status: 'success', progress: 100, doc_id: result.doc_id } : p
-        ))
+        setUploadProgress(prev => prev.map((p, idx) => idx === i ? { ...p, progress: 65 } : p))
+        await adminService.uploadDocument(pdfFiles[i])
+        setUploadProgress(prev => prev.map((p, idx) => idx === i ? { ...p, status: 'success', progress: 100 } : p))
       } catch (err) {
-        console.error(`Upload failed for ${file.name}:`, err)
-        
-        // Update progress - error
-        setUploadProgress(prev => prev.map((p, idx) => 
-          idx === i ? { ...p, status: 'error', progress: 0, error: err.message } : p
-        ))
+        setUploadProgress(prev => prev.map((p, idx) => idx === i ? { ...p, status: 'error', error: err.message } : p))
       }
     }
-
     setUploading(false)
-    
-    // Refresh document list after 2 seconds
-    setTimeout(() => {
-      fetchDocuments()
-      setUploadProgress([])
-    }, 2000)
+    setTimeout(() => fetchDocuments(), 2000)
   }
 
-  const getStatusColor = (status) => {
-    switch (status) {
-      case 'UPLOADED': return 'bg-blue-100 text-blue-800'
-      case 'IDP_RUNNING': return 'bg-yellow-100 text-yellow-800'
-      case 'EMBEDDING_DONE': return 'bg-green-100 text-green-800'
-      case 'FAILED': return 'bg-red-100 text-red-800'
-      default: return 'bg-gray-100 text-gray-800'
-    }
+  const removeUploadItem = (idx) => setUploadProgress(prev => prev.filter((_, i) => i !== idx))
+
+  const formatFileSize = (bytes) => {
+    if (!bytes) return '0 B'
+    const k = 1024, sizes = ['B', 'KB', 'MB', 'GB']
+    const i = Math.floor(Math.log(bytes) / Math.log(k))
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i]
   }
+
+  const getStatusChip = (status) => {
+    const config = {
+      'UPLOADED': { color: 'default' },
+      'IDP_RUNNING': { color: 'warning' },
+      'EMBEDDING_DONE': { color: 'success' },
+      'FAILED': { color: 'danger' }
+    }[status] || { color: 'default' }
+    return <Chip size="sm" color={config.color} variant="flat">{status}</Chip>
+  }
+
+  const handleLogout = async () => {
+    await authService.logout()
+    navigate('/login')
+  }
+
+  const menuItems = [
+    { id: 'dashboard', label: 'Dashboard', icon: '📊' },
+    { id: 'chatbot', label: 'Chatbot', icon: '💬', onClick: () => navigate('/chat') },
+    { id: 'documents', label: 'Document Management', icon: '📄' },
+    { id: 'users', label: 'Users', icon: '👥' },
+    { id: 'settings', label: 'Settings', icon: '⚙️' },
+  ]
 
   return (
-    <div className="min-h-screen bg-gray-50">
-      {/* Header */}
-      <div className="bg-white border-b px-6 py-4">
-        <h1 className="text-xl font-semibold">Admin Dashboard</h1>
-        <p className="text-sm text-gray-600">Upload and manage research documents</p>
+    <div className="flex min-h-screen bg-gray-50">
+      {/* Sidebar */}
+      <div className="w-64 bg-white border-r flex flex-col">
+        <div className="p-4 border-b">
+          <div className="flex items-center gap-3">
+            <div className="w-8 h-8 bg-blue-500 rounded-lg flex items-center justify-center text-white font-bold text-sm">ARC</div>
+            <div>
+              <h1 className="font-semibold text-gray-800">ARC Chatbot</h1>
+              <p className="text-xs text-gray-500">Researcher Portal</p>
+            </div>
+          </div>
+        </div>
+        <nav className="flex-1 p-4 space-y-1">
+          {menuItems.map((item) => (
+            <button
+              key={item.id}
+              onClick={item.onClick || (() => setActiveMenu(item.id))}
+              className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-colors ${
+                activeMenu === item.id ? 'bg-blue-50 text-blue-600 font-medium' : 'text-gray-600 hover:bg-gray-100'
+              }`}
+            >
+              <span>{item.icon}</span>
+              <span>{item.label}</span>
+            </button>
+          ))}
+        </nav>
+        <div className="p-4 border-t space-y-1">
+          <button className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm text-gray-600 hover:bg-gray-100">
+            <span>❓</span><span>Help</span>
+          </button>
+          <button onClick={handleLogout} className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm text-gray-600 hover:bg-gray-100">
+            <span>🚪</span><span>Logout</span>
+          </button>
+        </div>
       </div>
 
-      <div className="max-w-6xl mx-auto p-6 space-y-6">
+      {/* Main Content */}
+      <div className="flex-1 p-8">
+        <h1 className="text-2xl font-bold text-gray-800 mb-8">Document Management</h1>
+
         {/* Upload Section */}
-        <div className="bg-white rounded-lg shadow p-6">
-          <h2 className="text-lg font-semibold mb-4">Upload Documents</h2>
-          
-          <div
-            onDragEnter={handleDrag}
-            onDragLeave={handleDrag}
-            onDragOver={handleDrag}
-            onDrop={handleDrop}
-            className={`border-2 border-dashed rounded-lg p-12 text-center transition-colors ${
-              dragActive ? 'border-blue-500 bg-blue-50' : 
-              uploading ? 'border-gray-300 bg-gray-50' : 'border-gray-300'
-            }`}
-          >
-            <svg
-              className="mx-auto h-12 w-12 text-gray-400"
-              stroke="currentColor"
-              fill="none"
-              viewBox="0 0 48 48"
+        <Card className="mb-8">
+          <CardBody className="p-6">
+            <h2 className="text-lg font-semibold mb-4">Upload New Documents</h2>
+            <div
+              onDragEnter={handleDrag}
+              onDragLeave={handleDrag}
+              onDragOver={handleDrag}
+              onDrop={handleDrop}
+              className={`border-2 border-dashed rounded-xl p-8 text-center transition-all ${
+                dragActive ? 'border-blue-500 bg-blue-50' : 'border-gray-200 hover:border-gray-300'
+              }`}
             >
-              <path
-                d="M28 8H12a4 4 0 00-4 4v20m32-12v8m0 0v8a4 4 0 01-4 4H12a4 4 0 01-4-4v-4m32-4l-3.172-3.172a4 4 0 00-5.656 0L28 28M8 32l9.172-9.172a4 4 0 015.656 0L28 28m0 0l4 4m4-24h8m-4-4v8m-12 4h.02"
-                strokeWidth={2}
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              />
-            </svg>
-            <p className="mt-2 text-sm text-gray-600">
-              {uploading ? 'Uploading...' : 'Drag and drop PDF files here, or'}
-            </p>
-            <label className="mt-2 inline-block">
-              <span className={`px-4 py-2 rounded-md transition-colors ${
-                uploading 
-                  ? 'bg-gray-400 cursor-not-allowed' 
-                  : 'bg-blue-600 hover:bg-blue-700 cursor-pointer'
-              } text-white`}>
-                {uploading ? 'Uploading...' : 'Browse Files'}
-              </span>
-              <input
-                type="file"
-                className="hidden"
-                accept=".pdf"
-                multiple
-                disabled={uploading}
-                onChange={handleFileInput}
-              />
-            </label>
-            <p className="mt-2 text-xs text-gray-500">
-              PDF files only • Multiple files supported
-            </p>
-          </div>
-
-          {/* Upload Progress */}
-          {uploadProgress.length > 0 && (
-            <div className="mt-4 space-y-2">
-              {uploadProgress.map((item, idx) => (
-                <div key={idx} className="bg-gray-50 rounded-lg p-3">
-                  <div className="flex items-center justify-between mb-2">
-                    <span className="text-sm font-medium text-gray-700 truncate flex-1">
-                      {item.filename}
-                    </span>
-                    <span className={`text-xs font-medium ml-2 ${
-                      item.status === 'success' ? 'text-green-600' :
-                      item.status === 'error' ? 'text-red-600' :
-                      'text-blue-600'
-                    }`}>
-                      {item.status === 'success' ? '✓ Uploaded' :
-                       item.status === 'error' ? '✗ Failed' :
-                       'Uploading...'}
-                    </span>
-                  </div>
-                  {item.status === 'uploading' && (
-                    <div className="w-full bg-gray-200 rounded-full h-2">
-                      <div 
-                        className="bg-blue-600 h-2 rounded-full transition-all duration-300"
-                        style={{ width: `${item.progress}%` }}
-                      ></div>
-                    </div>
-                  )}
-                  {item.status === 'error' && (
-                    <p className="text-xs text-red-600 mt-1">{item.error}</p>
-                  )}
-                </div>
-              ))}
+              <div className="w-12 h-12 mx-auto mb-4 bg-green-100 rounded-full flex items-center justify-center">
+                <svg className="w-6 h-6 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+                </svg>
+              </div>
+              <p className="text-gray-800 font-medium mb-1">Drag & drop PDF files here</p>
+              <p className="text-sm text-gray-500 mb-4">Supports multiple PDF files. Max size: 50MB per file.</p>
+              <label className="inline-block cursor-pointer">
+                <span className="px-6 py-2.5 bg-blue-500 hover:bg-blue-600 text-white font-medium rounded-lg transition-colors">
+                  Browse Files
+                </span>
+                <input 
+                  type="file" 
+                  className="hidden" 
+                  accept=".pdf" 
+                  multiple 
+                  disabled={uploading} 
+                  onChange={handleFileInput} 
+                />
+              </label>
             </div>
-          )}
-        </div>
 
-        {/* Documents List */}
-        <div className="bg-white rounded-lg shadow">
-          <div className="px-6 py-4 border-b">
-            <div className="flex items-center justify-between">
-              <h2 className="text-lg font-semibold">Documents</h2>
-              <div className="flex items-center gap-3">
-                {/* Auto-refresh toggle */}
-                <label className="flex items-center gap-2 text-sm">
-                  <input
-                    type="checkbox"
-                    checked={autoRefresh}
-                    onChange={(e) => setAutoRefresh(e.target.checked)}
-                    className="rounded"
-                  />
-                  <span className="text-gray-600">Auto-refresh (5s)</span>
-                </label>
-                
-                {/* Refresh button */}
-                <button
-                  onClick={() => fetchDocuments()}
+            {/* Upload Progress */}
+            <AnimatePresence>
+              {uploadProgress.length > 0 && (
+                <div className="mt-4 space-y-3">
+                  {uploadProgress.map((item, idx) => (
+                    <motion.div
+                      key={idx}
+                      initial={{ opacity: 0, y: -10 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      exit={{ opacity: 0, x: 100 }}
+                      className={`flex items-center gap-4 p-4 rounded-lg ${
+                        item.status === 'success' ? 'bg-green-50' : item.status === 'error' ? 'bg-red-50' : 'bg-gray-50'
+                      }`}
+                    >
+                      <div className="w-10 h-10 bg-red-100 rounded-lg flex items-center justify-center flex-shrink-0">
+                        <svg className="w-5 h-5 text-red-600" fill="currentColor" viewBox="0 0 20 20">
+                          <path fillRule="evenodd" d="M4 4a2 2 0 012-2h4.586A2 2 0 0112 2.586L15.414 6A2 2 0 0116 7.414V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4z" clipRule="evenodd" />
+                        </svg>
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-medium text-gray-800 truncate">{item.filename}</p>
+                        {item.status === 'uploading' && <p className="text-xs text-gray-500">{formatFileSize(item.size * item.progress / 100)} of {formatFileSize(item.size)}</p>}
+                        {item.status === 'success' && <p className="text-xs text-green-600">Upload Complete</p>}
+                        {item.status === 'error' && <p className="text-xs text-red-600">Upload Failed</p>}
+                      </div>
+                      {item.status === 'uploading' && (
+                        <div className="flex items-center gap-3 w-48">
+                          <Progress value={item.progress} color="primary" size="sm" className="flex-1" />
+                          <span className="text-sm text-gray-600 w-10">{item.progress}%</span>
+                        </div>
+                      )}
+                      {item.status === 'success' && (
+                        <div className="w-6 h-6 bg-green-500 rounded-full flex items-center justify-center">
+                          <svg className="w-4 h-4 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                          </svg>
+                        </div>
+                      )}
+                      {item.status === 'error' && (
+                        <div className="w-6 h-6 bg-red-500 rounded-full flex items-center justify-center">
+                          <span className="text-white text-xs font-bold">!</span>
+                        </div>
+                      )}
+                      {(item.status === 'success' || item.status === 'error') && (
+                        <button onClick={() => removeUploadItem(idx)} className="text-gray-400 hover:text-gray-600">
+                          <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                          </svg>
+                        </button>
+                      )}
+                    </motion.div>
+                  ))}
+                </div>
+              )}
+            </AnimatePresence>
+          </CardBody>
+        </Card>
+
+        {/* Documents Table */}
+        <Card>
+          <CardBody className="p-6">
+            <div className="flex items-center justify-between mb-6">
+              <h2 className="text-lg font-semibold">All Documents</h2>
+              <div className="flex items-center gap-4">
+                <div className="flex items-center gap-2">
+                  <span className="text-sm text-gray-600">Status:</span>
+                  <select 
+                    value={statusFilter} 
+                    onChange={(e) => setStatusFilter(e.target.value)} 
+                    className="w-40 px-3 py-1.5 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  >
+                    <option value="all">All</option>
+                    <option value="UPLOADED">Uploaded</option>
+                    <option value="IDP_RUNNING">Processing</option>
+                    <option value="EMBEDDING_DONE">Done</option>
+                    <option value="FAILED">Failed</option>
+                  </select>
+                </div>
+                <Checkbox isSelected={autoRefresh} onValueChange={setAutoRefresh} size="sm">
+                  <span className="text-sm text-gray-600">Auto-refresh (5s)</span>
+                </Checkbox>
+                <button 
+                  onClick={() => fetchDocuments()} 
                   disabled={loading}
-                  className="px-3 py-1 text-sm bg-gray-100 hover:bg-gray-200 rounded transition-colors disabled:opacity-50"
+                  className="p-2 hover:bg-gray-100 rounded-lg transition-colors disabled:opacity-50"
                 >
-                  🔄 Refresh
+                  {loading ? <Spinner size="sm" /> : '🔄'}
                 </button>
               </div>
             </div>
-            
-            {/* Status Filter */}
-            <div className="mt-3 flex gap-2">
-              <button
-                onClick={() => setStatusFilter(null)}
-                className={`px-3 py-1 text-xs rounded-full transition-colors ${
-                  statusFilter === null 
-                    ? 'bg-blue-600 text-white' 
-                    : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-                }`}
-              >
-                All
-              </button>
-              <button
-                onClick={() => setStatusFilter('UPLOADED')}
-                className={`px-3 py-1 text-xs rounded-full transition-colors ${
-                  statusFilter === 'UPLOADED' 
-                    ? 'bg-blue-600 text-white' 
-                    : 'bg-blue-100 text-blue-800 hover:bg-blue-200'
-                }`}
-              >
-                Uploaded
-              </button>
-              <button
-                onClick={() => setStatusFilter('IDP_RUNNING')}
-                className={`px-3 py-1 text-xs rounded-full transition-colors ${
-                  statusFilter === 'IDP_RUNNING' 
-                    ? 'bg-yellow-600 text-white' 
-                    : 'bg-yellow-100 text-yellow-800 hover:bg-yellow-200'
-                }`}
-              >
-                Processing
-              </button>
-              <button
-                onClick={() => setStatusFilter('EMBEDDING_DONE')}
-                className={`px-3 py-1 text-xs rounded-full transition-colors ${
-                  statusFilter === 'EMBEDDING_DONE' 
-                    ? 'bg-green-600 text-white' 
-                    : 'bg-green-100 text-green-800 hover:bg-green-200'
-                }`}
-              >
-                Done
-              </button>
-              <button
-                onClick={() => setStatusFilter('FAILED')}
-                className={`px-3 py-1 text-xs rounded-full transition-colors ${
-                  statusFilter === 'FAILED' 
-                    ? 'bg-red-600 text-white' 
-                    : 'bg-red-100 text-red-800 hover:bg-red-200'
-                }`}
-              >
-                Failed
-              </button>
-            </div>
-          </div>
-          
-          {/* Loading State */}
-          {loading && documents.length === 0 ? (
-            <div className="flex items-center justify-center py-12">
-              <div className="flex flex-col items-center gap-3">
-                <div className="w-8 h-8 border-4 border-blue-600 border-t-transparent rounded-full animate-spin"></div>
-                <p className="text-gray-600">Loading documents...</p>
-              </div>
-            </div>
-          ) : error ? (
-            <div className="p-6">
-              <div className="bg-red-50 border border-red-200 rounded-lg p-4">
+
+            {loading && documents.length === 0 ? (
+              <div className="flex items-center justify-center py-12"><Spinner size="lg" /></div>
+            ) : error ? (
+              <div className="p-6 bg-red-50 rounded-lg text-center">
                 <p className="text-red-800">⚠️ {error}</p>
-                <button
-                  onClick={() => fetchDocuments()}
-                  className="mt-2 text-sm text-red-600 hover:text-red-700 underline"
+                <button 
+                  onClick={() => fetchDocuments()} 
+                  className="mt-2 px-4 py-1.5 text-sm text-red-600 hover:text-red-700 hover:bg-red-100 rounded-lg transition-colors"
                 >
                   Try again
                 </button>
               </div>
-            </div>
-          ) : documents.length === 0 ? (
-            <div className="p-12 text-center">
-              <p className="text-gray-500">No documents found</p>
-              <p className="text-sm text-gray-400 mt-1">Upload some PDFs to get started</p>
-            </div>
-          ) : (
-            <>
-              <div className="overflow-x-auto">
-                <table className="w-full">
-                  <thead className="bg-gray-50">
-                    <tr>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">
-                        Filename
-                      </th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">
-                        Status
-                      </th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">
-                        Pages
-                      </th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">
-                        Chunks
-                      </th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">
-                        Uploaded
-                      </th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-gray-200">
-                    {documents.map((doc) => (
-                      <tr key={doc.doc_id} className="hover:bg-gray-50">
-                        <td className="px-6 py-4">
-                          <div className="flex flex-col">
-                            <span className="text-sm font-medium text-gray-900">
-                              {doc.filename}
-                            </span>
-                            <span className="text-xs text-gray-500 font-mono">
-                              {doc.doc_id.slice(0, 8)}...
-                            </span>
-                          </div>
-                        </td>
-                        <td className="px-6 py-4">
-                          <span className={`px-2 py-1 text-xs font-medium rounded-full ${getStatusColor(doc.status)}`}>
-                            {doc.status}
-                          </span>
-                          {doc.error_message && (
-                            <p className="text-xs text-red-600 mt-1">{doc.error_message}</p>
-                          )}
-                        </td>
-                        <td className="px-6 py-4 text-sm text-gray-500">
-                          {doc.page_count || '-'}
-                        </td>
-                        <td className="px-6 py-4 text-sm text-gray-500">
-                          {doc.chunk_count || '-'}
-                        </td>
-                        <td className="px-6 py-4 text-sm text-gray-500">
-                          {new Date(doc.uploaded_at).toLocaleString()}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+            ) : documents.length === 0 ? (
+              <div className="py-12 text-center">
+                <p className="text-gray-500">No documents found</p>
+                <p className="text-sm text-gray-400 mt-1">Upload some PDFs to get started</p>
               </div>
-              
-              {/* Pagination */}
-              {totalPages > 1 && (
-                <div className="px-6 py-4 border-t bg-gray-50 flex items-center justify-between">
-                  <button
-                    onClick={() => setPage(p => Math.max(1, p - 1))}
-                    disabled={page === 1}
-                    className="px-3 py-1 text-sm bg-white border rounded hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    ← Previous
-                  </button>
-                  <span className="text-sm text-gray-600">
-                    Page {page} of {totalPages}
-                  </span>
-                  <button
-                    onClick={() => setPage(p => Math.min(totalPages, p + 1))}
-                    disabled={page === totalPages}
-                    className="px-3 py-1 text-sm bg-white border rounded hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    Next →
-                  </button>
+            ) : (
+              <>
+                <div className="overflow-x-auto">
+                  <table className="w-full">
+                    <thead>
+                      <tr className="border-b">
+                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Filename</th>
+                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Doc ID</th>
+                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+                        <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Page Count</th>
+                        <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Chunk Count</th>
+                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Upload Time</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-100">
+                      {documents.map((doc) => (
+                        <tr key={doc.doc_id} className="hover:bg-gray-50">
+                          <td className="px-4 py-4 text-sm font-medium text-gray-800">{doc.filename}</td>
+                          <td className="px-4 py-4 text-sm text-gray-500 font-mono">doc_{doc.doc_id.slice(0, 7)}</td>
+                          <td className="px-4 py-4">{getStatusChip(doc.status)}</td>
+                          <td className="px-4 py-4 text-center text-sm text-gray-600">{doc.page_count || 0}</td>
+                          <td className="px-4 py-4 text-center text-sm text-gray-600">{doc.chunk_count || 0}</td>
+                          <td className="px-4 py-4 text-sm text-gray-600">
+                            {new Date(doc.uploaded_at).toLocaleString('en-US', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: true })}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
                 </div>
-              )}
-            </>
-          )}
-        </div>
+                <div className="flex items-center justify-between mt-6 pt-4 border-t">
+                  <p className="text-sm text-gray-600">
+                    Showing <span className="font-medium">{(page - 1) * PAGE_SIZE + 1}-{Math.min(page * PAGE_SIZE, totalDocs)}</span> of <span className="font-medium">{totalDocs}</span>
+                  </p>
+                  {totalPages > 1 && (
+                    <Pagination 
+                      total={totalPages} 
+                      page={page} 
+                      onChange={setPage} 
+                      showControls 
+                      size="sm"
+                      initialPage={1}
+                      color="primary"
+                    />
+                  )}
+                </div>
+              </>
+            )}
+          </CardBody>
+        </Card>
       </div>
     </div>
   )
