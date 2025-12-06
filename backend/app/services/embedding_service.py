@@ -29,12 +29,17 @@ logger = logging.getLogger(__name__)
 
 class CohereEmbeddingService:
     """
-    Embedding service using Cohere Embed English v3 via Bedrock.
+    Embedding service using Cohere Embed Multilingual v3 via Bedrock.
     
-    Model: cohere.embed-english-v3 (1024 dimensions)
+    Model: cohere.embed-multilingual-v3 (1024 dimensions)
+    Supports Vietnamese and 100+ languages.
+    
     Features:
     - Automatic retry with exponential backoff
     - Graceful error handling
+    
+    IMPORTANT: All documents MUST be embedded with the same model.
+    If you change the model, you MUST re-process all documents.
     """
     
     MODEL_ID = "cohere.embed-multilingual-v3"  # Supports Vietnamese and 100+ languages

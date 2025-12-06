@@ -31,6 +31,13 @@ from app.services.claude_service import (
     TokenUsage,
 )
 from app.services.bm25_search import BM25Index, HybridRetriever, BM25Result
+from app.services.language_context import (
+    LanguageContext,
+    get_language_context,
+    get_language_instruction,
+    get_language_switch_message,
+    detect_query_language,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -301,7 +308,10 @@ YOUR FOCUSED ANSWER:"""
         contexts: List[RAGContext],
     ) -> str:
         """Build complete RAG prompt with context and query."""
-        context_section = cls.build_context_section(contexts)
+        # Rank contexts by score before building prompt
+        # This ensures [1] is always the most relevant
+        ranked_contexts = cls.rank_contexts_by_score(contexts)
+        context_section = cls.build_context_section(ranked_contexts)
         
         return cls.QUERY_TEMPLATE.format(
             query=query,
@@ -309,17 +319,55 @@ YOUR FOCUSED ANSWER:"""
         )
     
     @classmethod
+    def rank_contexts_by_score(cls, contexts: List[RAGContext]) -> List[RAGContext]:
+        """
+        Rank contexts by score and assign citation IDs accordingly.
+        
+        This ensures:
+        - [1] = highest score (most relevant)
+        - [2] = second highest
+        - etc.
+        
+        Args:
+            contexts: List of RAGContext objects
+            
+        Returns:
+            Sorted contexts with reassigned citation IDs
+        """
+        if not contexts:
+            return contexts
+        
+        # Sort by score descending (highest first)
+        sorted_contexts = sorted(contexts, key=lambda x: x.score, reverse=True)
+        
+        # Reassign citation IDs based on rank
+        for idx, context in enumerate(sorted_contexts, 1):
+            context.citation_id = idx
+        
+        # Log ranking for debugging
+        logger.info(
+            f"Citation ranking by score: "
+            f"{[(c.citation_id, f'{c.score:.1f}%', c.doc_id[:8]) for c in sorted_contexts]}"
+        )
+        
+        return sorted_contexts
+    
+    @classmethod
     def extract_citations(cls, contexts: List[RAGContext]) -> List[Citation]:
-        """Extract citation objects from contexts."""
+        """Extract citation objects from contexts with full text for highlighting."""
+        # Ensure contexts are ranked by score before extracting
+        ranked_contexts = cls.rank_contexts_by_score(contexts)
+        
         return [
             Citation(
                 id=ctx.citation_id,
                 doc_id=ctx.doc_id,
                 page=ctx.page,
-                text_snippet=ctx.text[:100] + "..." if len(ctx.text) > 100 else ctx.text,
+                # Return full text (up to 1000 chars) for comprehensive citation display
+                text_snippet=ctx.text[:1000] + "..." if len(ctx.text) > 1000 else ctx.text,
                 score=ctx.score,
             )
-            for ctx in contexts
+            for ctx in ranked_contexts
         ]
 
 
@@ -440,8 +488,8 @@ class RAGService:
     def retrieve_contexts(
         self,
         query: str,
-        top_k: int = 10,  # ✅ OPTIMIZED: Increased to 10 for table-heavy documents
-        score_threshold: float = 0.4,  # ✅ OPTIMIZED: Lowered to 0.4 for better recall with tables
+        top_k: int = 3,  # Only top 3 most relevant results
+        score_threshold: float = 0.3,  # 30% minimum - balanced for recall
         search_filter: Optional[SearchFilter] = None,
     ) -> List[RAGContext]:
         """
@@ -563,6 +611,7 @@ class RAGService:
         history: Optional[List[Dict[str, str]]] = None,
         max_tokens: int = 2048,
         temperature: float = 0.7,
+        language_preference: Optional[str] = None,
     ) -> RAGResponse:
         """
         Generate answer using Claude with retrieved contexts.
@@ -573,20 +622,31 @@ class RAGService:
             history: Optional conversation history
             max_tokens: Maximum output tokens
             temperature: Sampling temperature
+            language_preference: Explicit language preference ("vi", "en", or None for auto)
             
         Returns:
             RAGResponse with answer and citations
         """
+        # Get language context with conversation awareness
+        lang_context = get_language_context(
+            query=query,
+            history=history,
+            user_language_preference=language_preference
+        )
+        
         # Build prompt with improved template
         prompt = self.prompt_builder.build_prompt(query, contexts)
         
-        # Detect language and select appropriate system prompt
-        lang = detect_language(query)
-        if lang == "vi":
+        # Select appropriate system prompt based on response language
+        if lang_context.response_language == "vi":
             system_prompt = SYSTEM_PROMPTS_VI[self.template]
             logger.debug(f"Using Vietnamese prompt for query: {query[:50]}...")
         else:
             system_prompt = SYSTEM_PROMPTS[self.template]
+        
+        # Add explicit language instruction
+        language_instruction = get_language_instruction(lang_context)
+        system_prompt = system_prompt + "\n" + language_instruction
         
         # Generate response
         response = self.claude_service.invoke(
@@ -597,11 +657,17 @@ class RAGService:
             temperature=temperature,
         )
         
+        # Add language switch notification if needed
+        answer = response.text
+        switch_msg = get_language_switch_message(lang_context)
+        if switch_msg:
+            answer = switch_msg + "\n\n" + answer
+        
         # Extract citations
         citations = self.prompt_builder.extract_citations(contexts)
         
         return RAGResponse(
-            answer=response.text,
+            answer=answer,
             citations=citations,
             usage=response.usage,
             model=response.model,
@@ -648,35 +714,38 @@ class RAGService:
             temperature=temperature,
         )
     
-    # ✅ OPTIMIZED FOR TABLE-HEAVY DOCUMENTS
+    # ✅ OPTIMIZED FOR PRECISION
     def query(
         self,
         query: str,
-        top_k: int = 10,  # ✅ OPTIMIZED: Increased to 10 for better table coverage
-        score_threshold: float = 0.4,  # ✅ OPTIMIZED: Balanced threshold for tables
+        top_k: int = 3,  # Only top 3 most relevant results
+        score_threshold: float = 0.3,  # 30% minimum - balanced for recall
         search_filter: Optional[SearchFilter] = None,
         history: Optional[List[Dict[str, str]]] = None,
         max_tokens: int = 2048,
         temperature: float = 0.7,
         stream: bool = False,
+        language_preference: Optional[str] = None,
     ):
         """
         Complete RAG query: retrieve + generate.
         
-        OPTIMIZED FOR TABLE-HEAVY DOCUMENTS:
-        - Increased top_k to 10 for better table coverage
-        - Balanced score_threshold at 0.4 for recall/precision
-        - Larger chunks preserve table structure
+        OPTIMIZED FOR PRECISION:
+        - top_k=3 for focused, high-quality results
+        - score_threshold=0.3 (30%) balanced for recall
+        - Only returns results that are truly relevant to the query
+        - Bilingual support with conversation-aware language detection
         
         Args:
             query: User query
-            top_k: Number of contexts to retrieve (default 10, optimized for tables)
-            score_threshold: Minimum relevance score (default 0.4, balanced for tables)
+            top_k: Number of contexts to retrieve (default 3)
+            score_threshold: Minimum relevance score (default 0.5 = 50%)
             search_filter: Optional document filter
             history: Optional conversation history
             max_tokens: Maximum output tokens
             temperature: Sampling temperature
             stream: Whether to stream response
+            language_preference: Explicit language preference ("vi", "en", or None for auto)
             
         Returns:
             RAGResponse or Generator[StreamChunk] if streaming
@@ -691,13 +760,46 @@ class RAGService:
         
         if not contexts:
             logger.warning(f"No contexts found for query (threshold={score_threshold}): {query[:50]}...")
-        else:
-            logger.info(
-                f"Retrieved {len(contexts)} contexts with scores: "
-                f"{[f'{c.score:.1f}%' for c in contexts]}"
+            
+            # Return empty context feedback with language-aware message
+            lang_context = get_language_context(
+                query=query,
+                history=history,
+                user_language_preference=language_preference
+            )
+            
+            if lang_context.response_language == "vi":
+                empty_message = (
+                    "⚠️ Không tìm thấy thông tin liên quan trong tài liệu.\n\n"
+                    "Vui lòng thử:\n"
+                    "- Đặt câu hỏi cụ thể hơn\n"
+                    "- Sử dụng từ khóa khác\n"
+                    "- Kiểm tra xem tài liệu đã được upload chưa"
+                )
+            else:
+                empty_message = (
+                    "⚠️ No relevant information found in the documents.\n\n"
+                    "Please try:\n"
+                    "- Asking a more specific question\n"
+                    "- Using different keywords\n"
+                    "- Checking if documents have been uploaded"
+                )
+            
+            return RAGResponse(
+                answer=empty_message,
+                citations=[],
+                usage=TokenUsage(input_tokens=0, output_tokens=0),
+                model=self.claude_service.model_alias,
+                contexts_used=0,
+                query=query,
             )
         
-        # Generate answer
+        logger.info(
+            f"Retrieved {len(contexts)} contexts with scores: "
+            f"{[f'{c.score:.1f}%' for c in contexts]}"
+        )
+        
+        # Generate answer with language awareness
         if stream:
             return self.generate_answer_stream(
                 query=query,
@@ -713,6 +815,7 @@ class RAGService:
                 history=history,
                 max_tokens=max_tokens,
                 temperature=temperature,
+                language_preference=language_preference,
             )
     
     def health_check(self) -> Dict[str, bool]:

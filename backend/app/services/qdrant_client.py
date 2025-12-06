@@ -455,6 +455,7 @@ class QdrantVectorStore:
         results = results[:top_k]
         
         # Convert to RAGContext with citation IDs
+        # Score is converted to percentage (0.56 -> 56.0) for frontend display
         rag_contexts = []
         for i, result in enumerate(results):
             rag_contexts.append(
@@ -463,7 +464,7 @@ class QdrantVectorStore:
                     doc_id=result.doc_id,
                     page=result.page,
                     chunk_index=result.chunk_index,
-                    score=result.score,
+                    score=result.score * 100,  # Convert to percentage for display
                     citation_id=i + 1,  # 1-indexed for [1], [2], etc.
                     is_table=result.is_table,
                 )

@@ -25,7 +25,7 @@ export async function sendChatMessage({
   userId = 'anonymous',
   docIds = null,
   template = 'default',
-  topK = 5,
+  topK = 3,  // Only top 3 most relevant citations
   includeHistory = true
 }) {
   const token = await authService.getAccessToken()

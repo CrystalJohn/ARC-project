@@ -205,9 +205,24 @@ def _clean_text(text: str) -> str:
     - Remove excessive whitespace
     - Fix common encoding issues
     - Normalize line breaks
+    - Fix Vietnamese encoding issues
     """
     if not text:
         return ""
+    
+    # Ensure text is properly decoded as UTF-8
+    if isinstance(text, bytes):
+        try:
+            text = text.decode('utf-8')
+        except UnicodeDecodeError:
+            try:
+                text = text.decode('latin-1')
+            except Exception:
+                text = text.decode('utf-8', errors='ignore')
+    
+    # Normalize Unicode (NFC form for Vietnamese)
+    import unicodedata
+    text = unicodedata.normalize('NFC', text)
     
     # Replace multiple spaces with single space
     text = re.sub(r' +', ' ', text)
@@ -219,19 +234,20 @@ def _clean_text(text: str) -> str:
     lines = [line.strip() for line in text.split('\n')]
     text = '\n'.join(lines)
     
-    # Fix common ligatures
-    ligatures = {
-        'ﬁ': 'fi',
-        'ﬂ': 'fl',
-        'ﬀ': 'ff',
-        'ﬃ': 'ffi',
-        'ﬄ': 'ffl',
+    # Fix common ligatures using Unicode code points
+    ligature_map = {
+        '\ufb01': 'fi',  # fi ligature
+        '\ufb02': 'fl',  # fl ligature
+        '\ufb00': 'ff',  # ff ligature
+        '\ufb03': 'ffi', # ffi ligature
+        '\ufb04': 'ffl', # ffl ligature
     }
-    for lig, replacement in ligatures.items():
+    for lig, replacement in ligature_map.items():
         text = text.replace(lig, replacement)
     
-    # Remove null characters
+    # Remove null characters and other control characters
     text = text.replace('\x00', '')
+    text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', text)
     
     # Strip final result
     return text.strip()

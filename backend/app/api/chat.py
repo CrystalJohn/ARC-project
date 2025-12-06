@@ -46,9 +46,10 @@ class ChatRequest(BaseModel):
     user_id: Optional[str] = Field("anonymous", description="User ID for history tracking")
     doc_ids: Optional[List[str]] = Field(None, description="Filter by specific documents")
     template: Optional[str] = Field("default", description="Prompt template: default, academic, concise, detailed")
-    top_k: Optional[int] = Field(5, ge=1, le=20, description="Number of context chunks")
+    top_k: Optional[int] = Field(3, ge=1, le=10, description="Number of context chunks (max 3 for best quality)")
     stream: Optional[bool] = Field(False, description="Enable streaming response")
     include_history: Optional[bool] = Field(True, description="Include conversation history in context")
+    language: Optional[str] = Field("auto", description="Response language: 'vi', 'en', or 'auto' for automatic detection")
     
     class Config:
         json_schema_extra = {
@@ -123,8 +124,8 @@ def get_rag_service() -> RAGService:
             qdrant_port=6333,
             region_name="ap-southeast-1",
             model="sonnet",
-            use_hybrid=False,  # Disable hybrid for now - vector-only works well
-            # TODO: Debug hybrid search initialization issue
+            use_hybrid=False,  # Disabled - BM25 init issue, vector-only works well
+            # TODO: Fix BM25 initialization before enabling hybrid
             # bm25_weight=0.3,
             # vector_weight=0.7,
         )
@@ -260,13 +261,19 @@ async def chat(request: ChatRequest, response: Response):
         except Exception as e:
             logger.warning(f"Failed to save user message: {e}")
         
-        # Execute RAG query with history (auto-fallback to Haiku if budget exceeded)
+        # Determine language preference
+        language_pref = None
+        if request.language and request.language != "auto":
+            language_pref = request.language
+        
+        # Execute RAG query with history and language preference
         rag_response = rag_service.query(
             query=request.query,
-            top_k=request.top_k or 5,
+            top_k=request.top_k or 3,
             search_filter=search_filter,
             history=history,
             stream=False,
+            language_preference=language_pref,
         )
         
         # Save assistant response to history
