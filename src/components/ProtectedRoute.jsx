@@ -9,9 +9,12 @@ function ProtectedRoute({ children, requireAdmin = false }) {
   const isAuthenticated = authService.isAuthenticated()
   const isAdmin = authService.isAdmin()
 
-  // Not authenticated - redirect to login
+  // Not authenticated - redirect to login with register prompt
   if (!isAuthenticated) {
-    return <Navigate to="/login" replace state={{ message: 'Please login to continue' }} />
+    return <Navigate to="/login" replace state={{ 
+      message: 'Please login or register to use the chatbot system.',
+      showRegisterHint: true 
+    }} />
   }
 
   // Requires admin but user is not admin - redirect to chat

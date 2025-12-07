@@ -249,20 +249,23 @@ class DocumentStatusManager:
         last_evaluated_key: Optional[dict] = None
     ) -> dict:
         """
-        List documents with optional status filter.
+        List documents with proper DynamoDB cursor-based pagination.
+        
+        Uses DynamoDB's native pagination (LastEvaluatedKey) instead of
+        fetching all and paginating in memory.
         
         Args:
             status: Filter by status (optional)
-            page_size: Number of items per page
-            last_evaluated_key: Pagination token
+            page_size: Items per page (default 20)
+            last_evaluated_key: Cursor for next page (from previous response)
             
         Returns:
-            dict: {items: [...], last_evaluated_key: ...}
+            dict: {items: [...], last_evaluated_key: ..., has_more: bool}
             
         Requirements: 11.1, 11.2
         """
         if status:
-            # Use GSI for status filtering
+            # Use GSI for status filtering - efficient query
             params = {
                 "TableName": self.table_name,
                 "IndexName": "status-index",
@@ -273,12 +276,12 @@ class DocumentStatusManager:
                 "ScanIndexForward": False  # Descending by uploaded_at
             }
         else:
-            # Scan all documents
+            # Scan with limit - still paginated properly
             params = {
                 "TableName": self.table_name,
                 "FilterExpression": "sk = :sk",
                 "ExpressionAttributeValues": {":sk": {"S": "METADATA"}},
-                "Limit": page_size
+                "Limit": page_size,
             }
         
         if last_evaluated_key:
@@ -290,10 +293,12 @@ class DocumentStatusManager:
             response = self._client.scan(**params)
         
         items = [self._parse_item(item) for item in response.get("Items", [])]
+        next_key = response.get("LastEvaluatedKey")
         
         return {
             "items": items,
-            "last_evaluated_key": response.get("LastEvaluatedKey")
+            "last_evaluated_key": next_key,
+            "has_more": next_key is not None,
         }
 
     def _parse_item(self, item: dict) -> dict:

@@ -12,8 +12,9 @@ function LoginPage() {
   const navigate = useNavigate()
   const location = useLocation()
 
-  // Get message from navigation state (e.g., session expired)
+  // Get message from navigation state (e.g., session expired, need to register)
   const stateMessage = location.state?.message
+  const showRegisterHint = location.state?.showRegisterHint
 
   // Check if user is already logged in and redirect based on role
   useEffect(() => {
@@ -98,14 +99,25 @@ function LoginPage() {
           Sign in to access your intelligent research assistant and manage your documents.
         </p>
         
-        {/* State message (e.g., session expired) */}
+        {/* State message (e.g., session expired, need to register) */}
         {stateMessage && (
           <motion.div 
             initial={{ opacity: 0, height: 0 }}
             animate={{ opacity: 1, height: 'auto' }}
-            className="mb-4 p-3 bg-blue-50 border border-blue-200 rounded-2xl text-sm text-blue-800"
+            className="mb-4 p-4 bg-blue-50 border border-blue-200 rounded-2xl text-sm text-blue-800"
           >
-            {stateMessage}
+            <p>{stateMessage}</p>
+            {showRegisterHint && (
+              <p className="mt-2">
+                Don't have an account?{' '}
+                <button 
+                  onClick={() => navigate('/register')}
+                  className="font-semibold text-blue-600 hover:text-blue-800 underline"
+                >
+                  Register here
+                </button>
+              </p>
+            )}
           </motion.div>
         )}
 

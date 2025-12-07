@@ -2,8 +2,8 @@
 Admin API endpoints for document management.
 
 Endpoints:
-- POST /api/admin/upload - Upload PDF document (WITH ROLLBACK)
-- GET /api/admin/documents - List documents with pagination
+- POST /api/admin/upload - Upload PDF document (WITH ROLLBACK) - ADMIN ONLY
+- GET /api/admin/documents - List documents with pagination - ADMIN ONLY
 
 Requirements: 10.1, 10.2, 10.3, 10.4, 10.5, 11.1, 11.2, 11.3, 11.4
 """
@@ -13,7 +13,7 @@ import uuid
 import json
 import logging
 from typing import Optional
-from fastapi import APIRouter, UploadFile, File, HTTPException, Query
+from fastapi import APIRouter, UploadFile, File, HTTPException, Query, Depends
 from pydantic import BaseModel
 import boto3
 from botocore.exceptions import ClientError
@@ -21,6 +21,11 @@ from botocore.exceptions import ClientError
 from app.services.document_status_manager import (
     DocumentStatusManager,
     DocumentStatus
+)
+from app.services.auth_service import (
+    CurrentUser,
+    get_current_user,
+    require_admin,
 )
 
 
@@ -64,6 +69,7 @@ class DocumentListResponse(BaseModel):
     page: int
     page_size: int
     has_more: bool
+    next_cursor: Optional[str] = None  # Cursor for next page (base64 encoded)
 
 
 # Initialize AWS clients
@@ -82,10 +88,12 @@ def get_status_manager():
 @router.post("/upload", response_model=UploadResponse)
 async def upload_document(
     file: UploadFile = File(...),
-    uploaded_by: str = Query(default="admin", description="User ID who uploads"),
+    admin_user: CurrentUser = Depends(require_admin),  # ✅ Require admin role
 ):
     """
     Upload a PDF document for processing WITH ROLLBACK SUPPORT.
+    
+    REQUIRES: Admin role (Cognito 'admin' group)
     
     - Validates file is PDF
     - Uploads to S3 with unique doc_id
@@ -95,6 +103,8 @@ async def upload_document(
     
     Requirements: 10.1, 10.2, 10.3, 10.4
     """
+    # Get uploader from authenticated user
+    uploaded_by = admin_user.email or admin_user.user_id
     # Validate file type
     if not file.filename or not file.filename.lower().endswith(".pdf"):
         raise HTTPException(
@@ -236,19 +246,28 @@ async def upload_document(
 
 @router.get("/documents", response_model=DocumentListResponse)
 async def list_documents(
-    page: int = Query(default=1, ge=1, description="Page number"),
+    page: int = Query(default=1, ge=1, description="Page number (for display only)"),
     page_size: int = Query(default=20, ge=1, le=100, description="Items per page"),
     status: Optional[str] = Query(default=None, description="Filter by status"),
+    cursor: Optional[str] = Query(default=None, description="Pagination cursor (base64 encoded)"),
+    admin_user: CurrentUser = Depends(require_admin),  # ✅ Require admin role
 ):
     """
-    List documents with pagination and optional status filter.
+    List documents with cursor-based pagination.
     
-    - Supports pagination (default 20 per page)
-    - Filter by status: UPLOADED, IDP_RUNNING, EMBEDDING_DONE, FAILED
-    - Sorted by uploaded_at descending (newest first)
+    REQUIRES: Admin role (Cognito 'admin' group)
+    
+    Uses DynamoDB native pagination (cursor-based) for efficiency.
+    - First request: no cursor
+    - Next page: use cursor from previous response
+    
+    Filter by status: UPLOADED, IDP_RUNNING, EMBEDDING_DONE, FAILED
     
     Requirements: 11.1, 11.2, 11.3, 11.4
     """
+    import base64
+    import json
+    
     status_manager = get_status_manager()
     
     # Validate status filter
@@ -262,15 +281,24 @@ async def list_documents(
                 detail=f"Invalid status. Must be one of: {[s.value for s in DocumentStatus]}"
             )
     
-    # Get documents
+    # Decode cursor if provided
+    last_evaluated_key = None
+    if cursor:
+        try:
+            last_evaluated_key = json.loads(base64.b64decode(cursor).decode())
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid cursor")
+    
+    # Query DynamoDB with proper pagination (no memory pagination!)
     result = status_manager.list_documents(
         status=status_filter,
-        page_size=page_size
+        page_size=page_size,
+        last_evaluated_key=last_evaluated_key,
     )
     
-    items = []
-    for doc in result["items"]:
-        items.append(DocumentItem(
+    # Convert to response items
+    items = [
+        DocumentItem(
             doc_id=doc.get("doc_id", ""),
             filename=doc.get("filename", ""),
             status=doc.get("status", ""),
@@ -279,29 +307,39 @@ async def list_documents(
             page_count=doc.get("page_count"),
             chunk_count=doc.get("chunk_count"),
             error_message=doc.get("error_message")
-        ))
+        )
+        for doc in result["items"]
+    ]
     
-    # Sort by uploaded_at descending
+    # Sort by uploaded_at descending (in case GSI doesn't sort)
     items.sort(key=lambda x: x.uploaded_at, reverse=True)
     
-    # Apply pagination (simple offset-based for now)
-    start_idx = (page - 1) * page_size
-    end_idx = start_idx + page_size
-    paginated_items = items[start_idx:end_idx]
+    # Encode next cursor
+    next_cursor = None
+    if result.get("last_evaluated_key"):
+        next_cursor = base64.b64encode(
+            json.dumps(result["last_evaluated_key"]).encode()
+        ).decode()
     
     return DocumentListResponse(
-        items=paginated_items,
-        total=len(items),
+        items=items,
+        total=len(items),  # Note: total is items in this page (DynamoDB doesn't give total count efficiently)
         page=page,
         page_size=page_size,
-        has_more=end_idx < len(items)
+        has_more=result.get("has_more", False),
+        next_cursor=next_cursor,  # Add cursor to response
     )
 
 
 @router.get("/documents/{doc_id}/download")
-async def download_document(doc_id: str):
+async def download_document(
+    doc_id: str,
+    admin_user: CurrentUser = Depends(require_admin),  # ✅ Require admin role
+):
     """
     Generate presigned URL for document download.
+    
+    REQUIRES: Admin role (Cognito 'admin' group)
     
     Returns a temporary URL (valid for 1 hour) to download the PDF.
     """
@@ -344,8 +382,15 @@ async def download_document(doc_id: str):
 
 
 @router.get("/documents/{doc_id}")
-async def get_document(doc_id: str):
-    """Get a single document by ID."""
+async def get_document(
+    doc_id: str,
+    admin_user: CurrentUser = Depends(require_admin),  # ✅ Require admin role
+):
+    """
+    Get a single document by ID.
+    
+    REQUIRES: Admin role (Cognito 'admin' group)
+    """
     status_manager = get_status_manager()
     doc = status_manager.get_document(doc_id)
     

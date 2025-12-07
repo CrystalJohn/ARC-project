@@ -14,7 +14,8 @@ IMPROVEMENTS APPLIED:
 """
 
 import logging
-from typing import List, Dict, Any, Optional, Generator
+import re
+from typing import List, Dict, Any, Optional, Generator, Set
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -87,6 +88,12 @@ CRITICAL INSTRUCTIONS:
 5. ALWAYS cite sources using [1], [2], etc. for EVERY piece of information
 6. If the context does NOT contain the answer, say "The provided documents do not contain specific information about [topic]"
 
+CITATION PRIORITY (IMPORTANT):
+- Citations are ordered by relevance: [1] = HIGHEST score, [2] = second highest, etc.
+- PRIORITIZE using [1] in your answer as it's the most relevant context
+- Use ALL provided citations when possible, especially high-score ones
+- If [1] doesn't directly answer the question, still reference it if related
+
 ANSWER STRUCTURE:
 - First sentence: Direct answer to the user's question
 - Following sentences: Supporting evidence from context with citations
@@ -156,6 +163,12 @@ HƯỚNG DẪN QUAN TRỌNG:
 4. BẮT ĐẦU với câu trả lời trực tiếp, sau đó cung cấp chi tiết hỗ trợ
 5. LUÔN trích dẫn nguồn bằng [1], [2], v.v. cho MỌI thông tin
 6. Nếu ngữ cảnh KHÔNG chứa câu trả lời, nói "Tài liệu được cung cấp không chứa thông tin cụ thể về [chủ đề]"
+
+ƯU TIÊN TRÍCH DẪN (QUAN TRỌNG):
+- Trích dẫn được sắp xếp theo độ liên quan: [1] = điểm CAO NHẤT, [2] = cao thứ hai, v.v.
+- ƯU TIÊN sử dụng [1] trong câu trả lời vì đây là ngữ cảnh liên quan nhất
+- Sử dụng TẤT CẢ trích dẫn được cung cấp khi có thể, đặc biệt là những trích dẫn có điểm cao
+- Nếu [1] không trả lời trực tiếp câu hỏi, vẫn tham chiếu nếu liên quan
 
 CẤU TRÚC TRẢ LỜI:
 - Câu đầu tiên: Trả lời trực tiếp câu hỏi của người dùng
@@ -274,14 +287,24 @@ Focus on extracting information that directly addresses the question.
 {context_section}
 === END CONTEXT ===
 
+⚠️ CITATION PRIORITY RULES (MUST FOLLOW):
+1. [1] has the HIGHEST relevance score - it is the MOST relevant to the query
+2. You MUST use [1] in your answer - it contains the most relevant information
+3. Use ALL provided citations [1], [2], [3] when they contain relevant information
+4. Start your answer by referencing [1] first, then add details from [2], [3]
+
+Example format:
+✅ GOOD: "Theo [1], lập trình hướng đối tượng là... Các đặc điểm chính bao gồm... [2]. Ngoài ra, [3] cho thấy..."
+❌ BAD: Ignoring [1] and only using [2] or [3]
+
 INSTRUCTIONS:
 1. Read the question above carefully and understand what is being asked
-2. Identify which parts of the context are most relevant to answering this question
-3. Provide a direct answer focused on the specific question
-4. Cite every piece of information with [1], [2], etc.
-5. If the context doesn't contain the answer, clearly state what information IS available
+2. START your answer using information from [1] (highest relevance)
+3. Add supporting details from [2], [3] as needed
+4. Cite EVERY piece of information with [1], [2], etc.
+5. If [1] doesn't directly answer the question, still reference it and explain why
 
-YOUR FOCUSED ANSWER:"""
+YOUR FOCUSED ANSWER (must include [1]):"""
     
     @classmethod
     def build_context_section(cls, contexts: List[RAGContext]) -> str:
@@ -319,7 +342,7 @@ YOUR FOCUSED ANSWER:"""
         )
     
     @classmethod
-    def rank_contexts_by_score(cls, contexts: List[RAGContext]) -> List[RAGContext]:
+    def rank_contexts_by_score(cls, contexts: List[RAGContext], force_rerank: bool = False) -> List[RAGContext]:
         """
         Rank contexts by score and assign citation IDs accordingly.
         
@@ -330,12 +353,23 @@ YOUR FOCUSED ANSWER:"""
         
         Args:
             contexts: List of RAGContext objects
+            force_rerank: Force re-ranking even if already ranked
             
         Returns:
             Sorted contexts with reassigned citation IDs
         """
         if not contexts:
             return contexts
+        
+        # Check if already properly ranked (skip if [1] has highest score)
+        if not force_rerank and len(contexts) > 1:
+            is_sorted = all(
+                contexts[i].score >= contexts[i+1].score 
+                for i in range(len(contexts)-1)
+            )
+            if is_sorted and contexts[0].citation_id == 1:
+                logger.debug("Contexts already ranked by score, skipping re-rank")
+                return contexts
         
         # Sort by score descending (highest first)
         sorted_contexts = sorted(contexts, key=lambda x: x.score, reverse=True)
@@ -346,8 +380,8 @@ YOUR FOCUSED ANSWER:"""
         
         # Log ranking for debugging
         logger.info(
-            f"Citation ranking by score: "
-            f"{[(c.citation_id, f'{c.score:.1f}%', c.doc_id[:8]) for c in sorted_contexts]}"
+            f"✅ Citation ranking by score: "
+            f"{[(c.citation_id, f'{c.score:.1f}%', c.doc_id[:20] if c.doc_id else 'unknown') for c in sorted_contexts]}"
         )
         
         return sorted_contexts
@@ -369,6 +403,68 @@ YOUR FOCUSED ANSWER:"""
             )
             for ctx in ranked_contexts
         ]
+
+
+def validate_citations(answer: str, contexts: List[RAGContext]) -> Dict[str, Any]:
+    """
+    Validate citation quality in the generated answer.
+    
+    Checks:
+    - Which citations were actually used
+    - Whether high-score contexts were cited
+    - Citation coverage percentage
+    
+    Args:
+        answer: Generated answer text
+        contexts: List of contexts provided to LLM
+        
+    Returns:
+        Dictionary with validation metrics and warnings
+    """
+    if not contexts:
+        return {
+            "cited_ids": set(),
+            "citation_coverage": 0,
+            "high_score_usage": 1.0,
+            "warnings": []
+        }
+    
+    # Extract citation IDs from answer [1], [2], etc.
+    cited_ids: Set[int] = set(map(int, re.findall(r'\[(\d+)\]', answer)))
+    
+    # Find high-score contexts (>= 60%)
+    high_score_threshold = 60.0
+    high_score_contexts = [c for c in contexts if c.score >= high_score_threshold]
+    high_score_cited = [c for c in high_score_contexts if c.citation_id in cited_ids]
+    
+    # Calculate metrics
+    citation_coverage = len(cited_ids) / len(contexts) if contexts else 0
+    high_score_usage = len(high_score_cited) / len(high_score_contexts) if high_score_contexts else 1.0
+    
+    # Generate warnings
+    warnings = []
+    
+    # Warning if [1] (highest score) not cited
+    if contexts and 1 not in cited_ids:
+        warnings.append(f"⚠️ Citation [1] (highest score: {contexts[0].score:.1f}%) not used in answer")
+    
+    # Warning if high-score contexts not used
+    if high_score_usage < 1.0:
+        unused = [c.citation_id for c in high_score_contexts if c.citation_id not in cited_ids]
+        warnings.append(f"⚠️ High-score contexts not cited: {unused}")
+    
+    # Log validation results
+    logger.info(
+        f"📊 Citation validation: cited={sorted(cited_ids)}, "
+        f"coverage={citation_coverage:.0%}, high_score_usage={high_score_usage:.0%}"
+    )
+    
+    return {
+        "cited_ids": cited_ids,
+        "citation_coverage": citation_coverage,
+        "high_score_usage": high_score_usage,
+        "warnings": warnings
+    }
 
 
 class RAGService:
@@ -460,7 +556,9 @@ class RAGService:
     
     def _vector_search_fn(self, query: str, top_k: int) -> List[Dict]:
         """Vector search function for hybrid retriever."""
-        query_embedding = self.embedding_service.embed_text(query)
+        # IMPORTANT: Use input_type="search_query" for queries (not "search_document")
+        # Cohere Embed v3 optimizes vectors differently for queries vs documents
+        query_embedding = self.embedding_service.embed_text(query, input_type="search_query")
         
         results = self.vector_store.search(
             query_vector=query_embedding,
@@ -484,7 +582,7 @@ class RAGService:
             for r in results
         ]
     
-    # ✅ FIX #3: ADAPTIVE HYBRID WEIGHTS FOR TECHNICAL QUERIES
+    # ✅ FIX #3: ADAPTIVE HYBRID WEIGHTS FOR TECHNICAL QUERIES (Thread-safe)
     def retrieve_contexts(
         self,
         query: str,
@@ -498,92 +596,87 @@ class RAGService:
         Uses Hybrid Retrieval (BM25 + Vector) if enabled.
         With adaptive weighting for technical queries.
         
-        OPTIMIZED FOR TABLE-HEAVY DOCUMENTS:
-        - top_k=10 ensures full table rows are captured
-        - score_threshold=0.4 balances precision/recall for structured data
-        - Larger chunks (500 tokens) prevent table splitting
+        THREAD-SAFE: Uses local variables for weights to avoid race conditions.
         
         Args:
             query: User query
-            top_k: Number of contexts to retrieve (default 10, optimized for tables)
-            score_threshold: Minimum relevance score (default 0.4, balanced for tables)
+            top_k: Number of contexts to retrieve
+            score_threshold: Minimum relevance score (default 0.3 = 30%)
             search_filter: Optional filter for documents
             
         Returns:
-            List of RAGContext objects with citation IDs
+            List of RAGContext objects sorted by score with citation IDs
         """
-        # ✅ FIX #3: Detect technical/mathematical queries for adaptive weighting
+        # ✅ FIX: Detect technical queries for adaptive weighting
         technical_keywords = [
             'là gì', 'định nghĩa', 'khái niệm', 'công thức', 'phương pháp',
             'what is', 'definition', 'formula', 'method', 'concept'
         ]
         is_technical = any(kw in query.lower() for kw in technical_keywords)
         
-        # Store original weights
-        original_bm25 = self.bm25_weight
-        original_vector = self.vector_weight
+        # ✅ FIX #1: Use LOCAL variables instead of mutating instance state (thread-safe)
+        bm25_w = 0.5 if is_technical else self.bm25_weight
+        vector_w = 0.5 if is_technical else self.vector_weight
         
-        # Adjust weights for technical queries (better exact matching)
         if is_technical and self.use_hybrid:
-            self.bm25_weight = 0.5
-            self.vector_weight = 0.5
             logger.info(f"Technical query detected: '{query[:50]}...' - Using balanced weights (BM25=0.5, Vector=0.5)")
         
-        try:
-            # Try hybrid retrieval first
-            if self.use_hybrid:
-                try:
-                    # Initialize BM25 if needed
-                    self._init_bm25_from_qdrant()
+        contexts = []
+        
+        # Try hybrid retrieval first
+        if self.use_hybrid:
+            try:
+                # Initialize BM25 if needed
+                self._init_bm25_from_qdrant()
+                
+                if self._bm25_initialized and self.bm25_index.doc_count > 0:
+                    # ✅ FIX: Create hybrid retriever with LOCAL weights (thread-safe)
+                    hybrid = HybridRetriever(
+                        bm25_index=self.bm25_index,
+                        vector_search_fn=lambda q, k: self._vector_search_fn(q, k),
+                        bm25_weight=bm25_w,  # ✅ Local variable
+                        vector_weight=vector_w  # ✅ Local variable
+                    )
                     
-                    if self._bm25_initialized and self.bm25_index.doc_count > 0:
-                        # Create hybrid retriever
-                        hybrid = HybridRetriever(
-                            bm25_index=self.bm25_index,
-                            vector_search_fn=lambda q, k: self._vector_search_fn(q, k),
-                            bm25_weight=self.bm25_weight,
-                            vector_weight=self.vector_weight
-                        )
-                        
-                        # Perform hybrid search (fetch more for better filtering)
-                        results = hybrid.search(
-                            query=query,
-                            top_k=top_k * 2,  # Fetch 2x for filtering
-                            bm25_top_k=top_k * 3,
-                            vector_top_k=top_k * 3
-                        )
-                        
-                        # Filter by score threshold
-                        filtered_results = [
-                            r for r in results 
-                            if r.get("combined_score", 0) * 100 >= score_threshold * 100
-                        ]
-                        results = filtered_results[:top_k]
-                        
-                        # Convert to RAGContext
-                        contexts = []
-                        for i, r in enumerate(results):
-                            metadata = r.get("metadata", {})
-                            contexts.append(RAGContext(
-                                citation_id=i + 1,
-                                doc_id=r.get("doc_id", ""),
-                                page=metadata.get("page", 1),
-                                text=r.get("text", ""),
-                                score=r.get("combined_score", 0) * 100,  # Scale to percentage
-                                metadata=metadata
-                            ))
-                        
-                        logger.info(
-                            f"Hybrid retrieval: {len(contexts)} contexts "
-                            f"(score >= {score_threshold*100}%) for query: {query[:50]}..."
-                        )
-                        return contexts
-                        
-                except Exception as e:
-                    logger.warning(f"Hybrid retrieval failed, falling back to vector: {e}")
-            
-            # Fallback to vector-only search
-            query_embedding = self.embedding_service.embed_text(query)
+                    # Perform hybrid search (fetch more for better filtering)
+                    results = hybrid.search(
+                        query=query,
+                        top_k=top_k * 2,  # Fetch 2x for filtering
+                        bm25_top_k=top_k * 3,
+                        vector_top_k=top_k * 3
+                    )
+                    
+                    # Filter by score threshold
+                    filtered_results = [
+                        r for r in results 
+                        if r.get("combined_score", 0) * 100 >= score_threshold * 100
+                    ]
+                    results = filtered_results[:top_k]
+                    
+                    # Convert to RAGContext (citation_id will be reassigned after sorting)
+                    for r in results:
+                        metadata = r.get("metadata", {})
+                        contexts.append(RAGContext(
+                            citation_id=0,  # Will be assigned after sorting
+                            doc_id=r.get("doc_id", ""),
+                            page=metadata.get("page", 1),
+                            text=r.get("text", ""),
+                            score=r.get("combined_score", 0) * 100,  # Scale to percentage
+                            metadata=metadata
+                        ))
+                    
+                    logger.info(
+                        f"Hybrid retrieval: {len(contexts)} contexts "
+                        f"(score >= {score_threshold*100}%) for query: {query[:50]}..."
+                    )
+                    
+            except Exception as e:
+                logger.warning(f"Hybrid retrieval failed, falling back to vector: {e}")
+                contexts = []  # Reset for fallback
+        
+        # Fallback to vector-only search if hybrid failed or not enabled
+        if not contexts:
+            query_embedding = self.embedding_service.embed_text(query, input_type="search_query")
             
             contexts = self.vector_store.search_for_rag(
                 query_vector=query_embedding,
@@ -596,13 +689,22 @@ class RAGService:
                 f"Vector retrieval: {len(contexts)} contexts "
                 f"(score >= {score_threshold*100}%) for query: {query[:50]}..."
             )
-            return contexts
+        
+        # ✅ FIX #2: Sort by score and assign citation IDs BEFORE returning
+        if contexts:
+            # Sort by score descending (highest first)
+            contexts = sorted(contexts, key=lambda x: x.score, reverse=True)
             
-        finally:
-            # Restore original weights
-            if is_technical:
-                self.bm25_weight = original_bm25
-                self.vector_weight = original_vector
+            # Assign citation IDs based on rank: [1] = highest score
+            for idx, ctx in enumerate(contexts, 1):
+                ctx.citation_id = idx
+            
+            logger.info(
+                f"✅ Citations ranked by score: "
+                f"{[(c.citation_id, f'{c.score:.1f}%') for c in contexts]}"
+            )
+        
+        return contexts
     
     def generate_answer(
         self,
@@ -662,6 +764,17 @@ class RAGService:
         switch_msg = get_language_switch_message(lang_context)
         if switch_msg:
             answer = switch_msg + "\n\n" + answer
+        
+        # Validate citation quality
+        validation = validate_citations(answer, contexts)
+        if validation["warnings"]:
+            for warning in validation["warnings"]:
+                logger.warning(f"Citation quality: {warning}")
+            logger.info(
+                f"Citation metrics: coverage={validation['citation_coverage']:.0%}, "
+                f"high_score_usage={validation['high_score_usage']:.0%}, "
+                f"cited={validation['cited_ids']}"
+            )
         
         # Extract citations
         citations = self.prompt_builder.extract_citations(contexts)
@@ -794,9 +907,13 @@ class RAGService:
                 query=query,
             )
         
+        # CRITICAL: Sort contexts by score and reassign citation IDs
+        # This ensures [1] = highest score, [2] = second highest, etc.
+        contexts = self.prompt_builder.rank_contexts_by_score(contexts)
+        
         logger.info(
-            f"Retrieved {len(contexts)} contexts with scores: "
-            f"{[f'{c.score:.1f}%' for c in contexts]}"
+            f"Retrieved {len(contexts)} contexts (sorted by score): "
+            f"{[(c.citation_id, f'{c.score:.1f}%') for c in contexts]}"
         )
         
         # Generate answer with language awareness

@@ -470,13 +470,177 @@ class ChatHistoryManager:
             return None
 
 
+class CachedChatHistoryManager:
+    """
+    Caching wrapper for ChatHistoryManager.
+    
+    Reduces DynamoDB queries by caching conversation history.
+    Cache is invalidated when new messages are saved.
+    
+    Benefits:
+    - Reduces N+1 query problem (history loaded on every chat request)
+    - TTL-based cache expiration
+    - Automatic invalidation on write
+    """
+    
+    def __init__(
+        self,
+        history_manager: ChatHistoryManager,
+        cache_ttl_seconds: int = 300,  # 5 minutes default
+        max_cache_size: int = 1000,
+    ):
+        """
+        Initialize cached history manager.
+        
+        Args:
+            history_manager: Underlying ChatHistoryManager
+            cache_ttl_seconds: Cache TTL in seconds
+            max_cache_size: Maximum cache entries
+        """
+        self.history_manager = history_manager
+        self.cache_ttl_seconds = cache_ttl_seconds
+        self.max_cache_size = max_cache_size
+        self._cache: Dict[str, tuple] = {}  # key -> (data, timestamp)
+        
+        logger.info(f"Initialized CachedChatHistoryManager with TTL={cache_ttl_seconds}s")
+    
+    def _is_cache_valid(self, cache_key: str) -> bool:
+        """Check if cache entry is still valid."""
+        if cache_key not in self._cache:
+            return False
+        _, timestamp = self._cache[cache_key]
+        age = (datetime.now(timezone.utc) - timestamp).total_seconds()
+        return age < self.cache_ttl_seconds
+    
+    def _get_from_cache(self, cache_key: str) -> Optional[Any]:
+        """Get value from cache if valid."""
+        if self._is_cache_valid(cache_key):
+            data, _ = self._cache[cache_key]
+            logger.debug(f"Cache HIT: {cache_key}")
+            return data
+        logger.debug(f"Cache MISS: {cache_key}")
+        return None
+    
+    def _set_cache(self, cache_key: str, data: Any) -> None:
+        """Set cache value with current timestamp."""
+        # Evict oldest entries if cache is full
+        if len(self._cache) >= self.max_cache_size:
+            oldest_key = min(self._cache.keys(), key=lambda k: self._cache[k][1])
+            del self._cache[oldest_key]
+        
+        self._cache[cache_key] = (data, datetime.now(timezone.utc))
+    
+    def _invalidate_cache(self, conversation_id: str) -> None:
+        """Invalidate all cache entries for a conversation."""
+        keys_to_delete = [k for k in self._cache if k.startswith(f"history:{conversation_id}:")]
+        for key in keys_to_delete:
+            del self._cache[key]
+        if keys_to_delete:
+            logger.debug(f"Cache invalidated for conversation {conversation_id}")
+    
+    def get_history_for_context(
+        self,
+        conversation_id: str,
+        max_messages: int = 10,
+    ) -> List[Dict[str, str]]:
+        """
+        Get conversation history with caching.
+        
+        Args:
+            conversation_id: Conversation identifier
+            max_messages: Maximum messages to include
+            
+        Returns:
+            List of message dicts for Claude
+        """
+        cache_key = f"history:{conversation_id}:{max_messages}"
+        
+        # Try cache first
+        cached = self._get_from_cache(cache_key)
+        if cached is not None:
+            return cached
+        
+        # Cache miss - fetch from DynamoDB
+        history = self.history_manager.get_history_for_context(
+            conversation_id=conversation_id,
+            max_messages=max_messages,
+        )
+        
+        # Store in cache
+        self._set_cache(cache_key, history)
+        return history
+    
+    def save_message(self, *args, **kwargs) -> ChatMessage:
+        """Save message and invalidate cache."""
+        result = self.history_manager.save_message(*args, **kwargs)
+        self._invalidate_cache(result.conversation_id)
+        return result
+    
+    def save_user_message(self, conversation_id: str, *args, **kwargs) -> ChatMessage:
+        """Save user message and invalidate cache."""
+        result = self.history_manager.save_user_message(conversation_id, *args, **kwargs)
+        self._invalidate_cache(conversation_id)
+        return result
+    
+    def save_assistant_message(self, conversation_id: str, *args, **kwargs) -> ChatMessage:
+        """Save assistant message and invalidate cache."""
+        result = self.history_manager.save_assistant_message(conversation_id, *args, **kwargs)
+        self._invalidate_cache(conversation_id)
+        return result
+    
+    def delete_conversation(self, conversation_id: str, user_id: str) -> int:
+        """Delete conversation and invalidate cache."""
+        result = self.history_manager.delete_conversation(conversation_id, user_id)
+        self._invalidate_cache(conversation_id)
+        return result
+    
+    # Delegate other methods directly
+    def get_conversation_history(self, *args, **kwargs):
+        return self.history_manager.get_conversation_history(*args, **kwargs)
+    
+    def list_conversations(self, *args, **kwargs):
+        return self.history_manager.list_conversations(*args, **kwargs)
+    
+    def get_cache_stats(self) -> Dict[str, Any]:
+        """Get cache statistics."""
+        valid_entries = sum(1 for k in self._cache if self._is_cache_valid(k))
+        return {
+            "total_entries": len(self._cache),
+            "valid_entries": valid_entries,
+            "expired_entries": len(self._cache) - valid_entries,
+            "max_size": self.max_cache_size,
+            "ttl_seconds": self.cache_ttl_seconds,
+        }
+
+
 # Convenience function
 def create_chat_history_manager(
     table_name: Optional[str] = None,
     region_name: Optional[str] = None,
+    use_cache: bool = True,
+    cache_ttl_seconds: int = 300,
 ) -> ChatHistoryManager:
-    """Create ChatHistoryManager instance."""
-    return ChatHistoryManager(
+    """
+    Create ChatHistoryManager instance.
+    
+    Args:
+        table_name: DynamoDB table name
+        region_name: AWS region
+        use_cache: Enable caching (recommended for production)
+        cache_ttl_seconds: Cache TTL
+        
+    Returns:
+        ChatHistoryManager or CachedChatHistoryManager
+    """
+    base_manager = ChatHistoryManager(
         table_name=table_name,
         region_name=region_name,
     )
+    
+    if use_cache:
+        return CachedChatHistoryManager(
+            history_manager=base_manager,
+            cache_ttl_seconds=cache_ttl_seconds,
+        )
+    
+    return base_manager

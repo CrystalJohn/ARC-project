@@ -12,10 +12,13 @@ Includes automatic model fallback based on budget.
 
 import logging
 import uuid
+import time
+import json
+from hashlib import sha256
 from typing import Optional, List, Dict, Any
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, HTTPException, Query, Response
+from fastapi import APIRouter, HTTPException, Query, Response, Depends
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -23,8 +26,10 @@ from app.services.rag_service import RAGService, PromptTemplate, RAGResponse
 from app.services.qdrant_client import SearchFilter
 from app.services.chat_history_manager import (
     ChatHistoryManager,
+    CachedChatHistoryManager,
     ChatMessage,
     MessageRole,
+    create_chat_history_manager,
 )
 from app.services.rate_limiter import (
     RateLimiter,
@@ -32,10 +37,36 @@ from app.services.rate_limiter import (
     get_rate_limiter,
 )
 from app.services.budget_manager import get_budget_manager
+from app.services.auth_service import (
+    CurrentUser,
+    get_current_user,
+    get_current_user_optional,
+)
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/chat", tags=["Chat"])
+
+
+# Custom Exceptions for better error handling
+class ChatError(Exception):
+    """Base exception for chat errors."""
+    pass
+
+
+class ContextRetrievalError(ChatError):
+    """Failed to retrieve contexts from vector store."""
+    pass
+
+
+class LLMGenerationError(ChatError):
+    """LLM generation failed."""
+    pass
+
+
+class HistoryError(ChatError):
+    """Failed to access chat history."""
+    pass
 
 
 # Request/Response Models
@@ -113,6 +144,86 @@ class ChatResponse(BaseModel):
 # Global service instances (lazy initialization)
 _rag_service: Optional[RAGService] = None
 _chat_history_manager: Optional[ChatHistoryManager] = None
+_response_cache: Optional["ResponseCache"] = None
+
+
+class ResponseCache:
+    """
+    Cache for identical RAG queries to avoid redundant LLM calls.
+    
+    Benefits:
+    - Save tokens and cost (no duplicate Claude calls)
+    - Reduce latency for repeated queries
+    - TTL-based expiration (default 1 hour)
+    
+    Cache key is based on: query + doc_ids + top_k
+    """
+    
+    def __init__(self, ttl_seconds: int = 3600, max_size: int = 500):
+        self.ttl_seconds = ttl_seconds
+        self.max_size = max_size
+        self._cache: Dict[str, tuple] = {}  # key -> (response_dict, timestamp)
+        logger.info(f"ResponseCache initialized: TTL={ttl_seconds}s, max_size={max_size}")
+    
+    def _generate_key(self, query: str, doc_ids: Optional[List[str]], top_k: int) -> str:
+        """Generate cache key from query parameters."""
+        cache_input = {
+            "query": query.lower().strip(),
+            "doc_ids": sorted(doc_ids) if doc_ids else [],
+            "top_k": top_k,
+        }
+        return sha256(json.dumps(cache_input, sort_keys=True).encode()).hexdigest()[:16]
+    
+    def get(self, query: str, doc_ids: Optional[List[str]], top_k: int) -> Optional[Dict]:
+        """Get cached response if valid."""
+        key = self._generate_key(query, doc_ids, top_k)
+        
+        if key not in self._cache:
+            return None
+        
+        response, timestamp = self._cache[key]
+        age = time.time() - timestamp
+        
+        if age > self.ttl_seconds:
+            del self._cache[key]
+            logger.debug(f"Response cache EXPIRED: {key}")
+            return None
+        
+        logger.info(f"Response cache HIT: {key} (age={age:.0f}s)")
+        return response
+    
+    def set(self, query: str, doc_ids: Optional[List[str]], top_k: int, response: Dict) -> None:
+        """Cache response."""
+        # Evict oldest if full
+        if len(self._cache) >= self.max_size:
+            oldest_key = min(self._cache.keys(), key=lambda k: self._cache[k][1])
+            del self._cache[oldest_key]
+        
+        key = self._generate_key(query, doc_ids, top_k)
+        self._cache[key] = (response, time.time())
+        logger.debug(f"Response cache SET: {key}")
+    
+    def get_stats(self) -> Dict[str, Any]:
+        """Get cache statistics."""
+        now = time.time()
+        valid = sum(1 for _, (_, ts) in self._cache.items() if now - ts < self.ttl_seconds)
+        return {
+            "total_entries": len(self._cache),
+            "valid_entries": valid,
+            "ttl_seconds": self.ttl_seconds,
+            "max_size": self.max_size,
+        }
+
+
+def get_response_cache() -> ResponseCache:
+    """Get or create ResponseCache instance."""
+    global _response_cache
+    if _response_cache is None:
+        _response_cache = ResponseCache(
+            ttl_seconds=3600,  # 1 hour
+            max_size=500,
+        )
+    return _response_cache
 
 
 def get_rag_service() -> RAGService:
@@ -133,10 +244,18 @@ def get_rag_service() -> RAGService:
 
 
 def get_chat_history_manager() -> ChatHistoryManager:
-    """Get or create ChatHistoryManager instance."""
+    """
+    Get or create ChatHistoryManager instance with caching.
+    
+    Uses CachedChatHistoryManager to reduce DynamoDB queries.
+    Cache TTL: 5 minutes, auto-invalidated on write.
+    """
     global _chat_history_manager
     if _chat_history_manager is None:
-        _chat_history_manager = ChatHistoryManager()
+        _chat_history_manager = create_chat_history_manager(
+            use_cache=True,  # ✅ Enable caching to reduce N+1 queries
+            cache_ttl_seconds=300,  # 5 minutes
+        )
     return _chat_history_manager
 
 
@@ -171,9 +290,15 @@ def _convert_rag_response(
 
 
 @router.post("", response_model=ChatResponse)
-async def chat(request: ChatRequest, response: Response):
+async def chat(
+    request: ChatRequest,
+    response: Response,
+    current_user: CurrentUser = Depends(get_current_user),  # ✅ Require authentication
+):
     """
     Send a chat message and get RAG-based response with citations.
+    
+    REQUIRES: Authentication (valid Cognito token)
     
     The endpoint retrieves relevant document chunks from the vector database,
     builds a prompt with context, and generates an answer using Claude.
@@ -182,7 +307,6 @@ async def chat(request: ChatRequest, response: Response):
     
     - **query**: The user's question (required)
     - **conversation_id**: Optional ID to continue a conversation
-    - **user_id**: User identifier for history tracking
     - **doc_ids**: Optional list of document IDs to search within
     - **template**: Prompt template style (default, academic, concise, detailed)
     - **top_k**: Number of context chunks to retrieve (1-20)
@@ -195,7 +319,8 @@ async def chat(request: ChatRequest, response: Response):
         
         # Generate conversation ID if not provided
         conversation_id = request.conversation_id or f"conv-{uuid.uuid4().hex[:12]}"
-        user_id = request.user_id or "anonymous"
+        # Use authenticated user ID instead of request parameter
+        user_id = current_user.user_id or current_user.email or "anonymous"
         
         # Estimate tokens for rate limiting (~4 chars per token)
         estimated_tokens = len(request.query) // 4 + 2000  # query + context + response
@@ -237,6 +362,23 @@ async def chat(request: ChatRequest, response: Response):
         search_filter = None
         if request.doc_ids:
             search_filter = SearchFilter(doc_ids=request.doc_ids)
+        
+        # Check response cache (only for queries without history context)
+        # Queries with history are unique per conversation, so not cached
+        response_cache = get_response_cache()
+        use_cache = not request.include_history or not request.conversation_id
+        
+        if use_cache:
+            cached_response = response_cache.get(
+                query=request.query,
+                doc_ids=request.doc_ids,
+                top_k=request.top_k or 3,
+            )
+            if cached_response:
+                # Return cached response with new conversation_id
+                cached_response["conversation_id"] = conversation_id
+                cached_response["timestamp"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+                return ChatResponse(**cached_response)
         
         # Get conversation history for context
         history = None
@@ -293,29 +435,94 @@ async def chat(request: ChatRequest, response: Response):
         if rag_response.usage:
             rate_limiter.record_usage(user_id, rag_response.usage.total_tokens)
         
-        # Convert and return response
-        return _convert_rag_response(rag_response, conversation_id)
+        # Convert to response
+        chat_response = _convert_rag_response(rag_response, conversation_id)
+        
+        # Cache response for identical future queries (only if no history used)
+        if use_cache:
+            response_cache.set(
+                query=request.query,
+                doc_ids=request.doc_ids,
+                top_k=request.top_k or 3,
+                response=chat_response.model_dump(),
+            )
+        
+        return chat_response
         
     except HTTPException:
         raise
-    except Exception as e:
+    except ContextRetrievalError as e:
+        logger.error(f"Context retrieval error: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=503,
+            detail="Unable to retrieve relevant information. Please try again later."
+        )
+    except LLMGenerationError as e:
+        logger.error(f"LLM generation error: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=503,
+            detail="Unable to generate response. Please try again later."
+        )
+    except ChatError as e:
         logger.error(f"Chat error: {e}", exc_info=True)
         raise HTTPException(
             status_code=500,
-            detail=f"Chat processing failed: {str(e)}"
+            detail="An error occurred processing your request. Please try again."
+        )
+    except Exception as e:
+        # Log full error but don't expose internal details to client
+        logger.error(f"Unexpected chat error: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail="An unexpected error occurred. Please contact support if this persists."
         )
 
 
 @router.post("/stream")
-async def chat_stream(request: ChatRequest):
+async def chat_stream(
+    request: ChatRequest,
+    response: Response,
+    current_user: CurrentUser = Depends(get_current_user),  # ✅ Require authentication
+):
     """
     Send a chat message and get streaming RAG-based response.
     
+    REQUIRES: Authentication (valid Cognito token)
+    
     Returns Server-Sent Events (SSE) stream with text chunks.
+    Includes rate limiting, history saving, and proper error handling.
     """
+    # Get services
+    rag_service = get_rag_service()
+    history_manager = get_chat_history_manager()
+    rate_limiter = get_rate_limiter()
+    
+    # Get user info
+    user_id = current_user.user_id or current_user.email or "anonymous"
+    conversation_id = request.conversation_id or f"conv-{uuid.uuid4().hex[:12]}"
+    
+    # ✅ Rate limiting (same as main endpoint)
+    estimated_tokens = len(request.query) // 4 + 2000
     try:
-        rag_service = get_rag_service()
-        
+        rate_limiter.acquire(
+            user_id=user_id,
+            estimated_tokens=estimated_tokens,
+            wait=False
+        )
+    except RateLimitExceeded as e:
+        response.headers["X-RateLimit-Remaining"] = "0"
+        response.headers["Retry-After"] = str(int(e.retry_after))
+        raise HTTPException(
+            status_code=429,
+            detail=f"Rate limit exceeded. {str(e)}",
+            headers={"Retry-After": str(int(e.retry_after))}
+        )
+    
+    # Add rate limit headers
+    status = rate_limiter.check_rate_limit(user_id)
+    response.headers["X-RateLimit-Remaining"] = str(status.requests_remaining)
+    
+    try:
         # Set template
         if request.template:
             try:
@@ -329,27 +536,63 @@ async def chat_stream(request: ChatRequest):
         if request.doc_ids:
             search_filter = SearchFilter(doc_ids=request.doc_ids)
         
-        # Retrieve contexts first
+        # ✅ Get conversation history (same as main endpoint)
+        history = None
+        if request.include_history and request.conversation_id:
+            try:
+                history = history_manager.get_history_for_context(
+                    conversation_id=conversation_id,
+                    max_messages=10,
+                )
+            except Exception as e:
+                logger.warning(f"Failed to load history for stream: {e}")
+        
+        # ✅ Save user message to history
+        try:
+            history_manager.save_user_message(
+                conversation_id=conversation_id,
+                content=request.query,
+                user_id=user_id,
+            )
+        except Exception as e:
+            logger.warning(f"Failed to save user message: {e}")
+        
+        # Retrieve contexts
         contexts = rag_service.retrieve_contexts(
             query=request.query,
             top_k=request.top_k or 5,
             search_filter=search_filter,
         )
         
-        # Generate streaming response
+        # Generate streaming response with history saving
         async def generate():
+            full_answer = ""
             try:
                 for chunk in rag_service.generate_answer_stream(
                     query=request.query,
                     contexts=contexts,
+                    history=history,
                 ):
                     if chunk.text:
+                        full_answer += chunk.text
                         yield f"data: {chunk.text}\n\n"
                     if chunk.is_final:
                         yield "data: [DONE]\n\n"
+                
+                # ✅ Save assistant message after streaming completes
+                if full_answer:
+                    try:
+                        history_manager.save_assistant_message(
+                            conversation_id=conversation_id,
+                            content=full_answer,
+                            user_id=user_id,
+                        )
+                    except Exception as e:
+                        logger.warning(f"Failed to save assistant message: {e}")
+                        
             except Exception as e:
-                logger.error(f"Stream error: {e}")
-                yield f"data: [ERROR] {str(e)}\n\n"
+                logger.error(f"Stream generation error: {e}")
+                yield f"data: [ERROR] An error occurred generating the response.\n\n"
         
         return StreamingResponse(
             generate(),
@@ -357,6 +600,7 @@ async def chat_stream(request: ChatRequest):
             headers={
                 "Cache-Control": "no-cache",
                 "Connection": "keep-alive",
+                "X-Conversation-ID": conversation_id,
             }
         )
         
@@ -364,7 +608,10 @@ async def chat_stream(request: ChatRequest):
         raise
     except Exception as e:
         logger.error(f"Stream chat error: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(
+            status_code=500,
+            detail="An error occurred setting up the stream. Please try again."
+        )
 
 
 @router.get("/health")

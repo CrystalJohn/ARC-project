@@ -23,6 +23,10 @@ from qdrant_client.http.models import (
     MatchAny,
     Range,
     PayloadSchemaType,
+    BinaryQuantization,
+    BinaryQuantizationConfig,
+    ScalarQuantization,
+    ScalarQuantizationConfig,
 )
 
 logger = logging.getLogger(__name__)
@@ -98,7 +102,12 @@ class QdrantVectorStore:
     """
     
     COLLECTION_NAME = "documents"
-    VECTOR_SIZE = 1024  # Cohere Embed English v3 output size
+    VECTOR_SIZE = 1024  # Cohere Embed Multilingual v3 output size
+    
+    # Binary Quantization settings for Cohere Embed v3
+    # Cohere v3 is specifically designed to work well with BQ
+    # Benefits: 32x memory reduction, 40x faster search, ~96-98% recall
+    USE_BINARY_QUANTIZATION = True
     
     def __init__(
         self,
@@ -146,12 +155,26 @@ class QdrantVectorStore:
                 return True
             
             # Create collection with 1024-dim vectors and cosine similarity
+            # Binary Quantization for Cohere Embed v3:
+            # - 32x memory reduction (4KB -> 128 bytes per vector)
+            # - 40x faster search with minimal recall loss (~96-98%)
+            # - Cohere v3 is specifically optimized for BQ via Matryoshka training
+            quantization_config = None
+            if self.USE_BINARY_QUANTIZATION:
+                quantization_config = BinaryQuantization(
+                    binary=BinaryQuantizationConfig(
+                        always_ram=True,  # Keep quantized vectors in RAM for speed
+                    )
+                )
+                logger.info("Binary Quantization enabled for Cohere Embed v3")
+            
             self.client.create_collection(
                 collection_name=self.COLLECTION_NAME,
                 vectors_config=VectorParams(
                     size=self.VECTOR_SIZE,
                     distance=Distance.COSINE,
                 ),
+                quantization_config=quantization_config,
             )
             
             # Create payload indexes for filtering
@@ -388,6 +411,18 @@ class QdrantVectorStore:
         query_filter = self._build_filter(search_filter, doc_id)
         
         # Search using query_points (qdrant-client >= 1.7)
+        # With Binary Quantization: use oversampling + rescore for better accuracy
+        # - First pass: fast BQ search with 2x candidates
+        # - Second pass: rescore with original vectors for precision
+        search_params = None
+        if self.USE_BINARY_QUANTIZATION:
+            search_params = models.SearchParams(
+                quantization=models.QuantizationSearchParams(
+                    rescore=True,  # Rescore with original vectors
+                    oversampling=2.0,  # Fetch 2x candidates before rescoring
+                )
+            )
+        
         results = self.client.query_points(
             collection_name=self.COLLECTION_NAME,
             query=query_vector,
@@ -395,6 +430,7 @@ class QdrantVectorStore:
             limit=top_k,
             score_threshold=score_threshold,
             with_payload=True,
+            search_params=search_params,
         )
         
         # Convert to SearchResult
@@ -476,47 +512,67 @@ class QdrantVectorStore:
         self,
         results: List[SearchResult],
         overlap_threshold: int = 1,
+        similarity_threshold: float = 0.7,
     ) -> List[SearchResult]:
         """
-        Remove overlapping chunks from same document.
+        Remove overlapping chunks from same document with text similarity check.
         
-        Keeps highest scoring chunk when chunks from same doc are adjacent.
+        Improved deduplication that:
+        1. Sorts by score first (process high-score chunks first)
+        2. Checks chunk proximity AND text similarity
+        3. Only removes if both conditions are met
         
         Args:
             results: Search results to deduplicate
             overlap_threshold: Max chunk_index difference to consider overlap
+            similarity_threshold: Min text similarity (0-1) to consider duplicate
             
         Returns:
             Deduplicated results
         """
+        from difflib import SequenceMatcher
+        
         if not results:
             return results
         
-        deduplicated = []
-        seen_chunks = {}  # (doc_id, chunk_index) -> score
+        # Sort by score descending (process high-score first)
+        sorted_results = sorted(results, key=lambda x: x.score, reverse=True)
         
-        for result in results:
-            key = (result.doc_id, result.chunk_index)
+        deduplicated = []
+        
+        for result in sorted_results:
+            is_duplicate = False
             
-            # Check if we've seen this exact chunk
-            if key in seen_chunks:
-                continue
-            
-            # Check for adjacent chunks from same doc
-            dominated = False
-            for offset in range(-overlap_threshold, overlap_threshold + 1):
-                if offset == 0:
+            for existing in deduplicated:
+                # Only check chunks from same document
+                if result.doc_id != existing.doc_id:
                     continue
-                adjacent_key = (result.doc_id, result.chunk_index + offset)
-                if adjacent_key in seen_chunks:
-                    # Keep if this one has higher score
-                    if result.score <= seen_chunks[adjacent_key]:
-                        dominated = True
-                        break
+                
+                # Check chunk proximity
+                chunk_distance = abs(result.chunk_index - existing.chunk_index)
+                if chunk_distance > overlap_threshold:
+                    continue
+                
+                # ✅ FIX: Check text similarity before marking as duplicate
+                # Compare first 500 chars for efficiency
+                similarity = SequenceMatcher(
+                    None,
+                    result.text[:500],
+                    existing.text[:500]
+                ).ratio()
+                
+                if similarity > similarity_threshold:
+                    # True duplicate - similar text in adjacent chunks
+                    is_duplicate = True
+                    logger.debug(
+                        f"Removing duplicate: chunk {result.chunk_index} "
+                        f"(score {result.score:.2f}) similar to {existing.chunk_index} "
+                        f"(score {existing.score:.2f}), similarity: {similarity:.2f}"
+                    )
+                    break
             
-            if not dominated:
+            if not is_duplicate:
                 deduplicated.append(result)
-                seen_chunks[key] = result.score
         
         return deduplicated
     
@@ -704,6 +760,64 @@ class QdrantVectorStore:
             return True
         except Exception:
             return False
+    
+    def enable_binary_quantization(self) -> bool:
+        """
+        Enable Binary Quantization on existing collection.
+        
+        Use this to migrate an existing collection to use BQ.
+        This will quantize existing vectors in-place.
+        
+        Benefits for Cohere Embed v3:
+        - 32x memory reduction
+        - 40x faster search
+        - ~96-98% recall (minimal loss)
+        
+        Returns:
+            True if successful
+        """
+        try:
+            self.client.update_collection(
+                collection_name=self.COLLECTION_NAME,
+                quantization_config=BinaryQuantization(
+                    binary=BinaryQuantizationConfig(
+                        always_ram=True,
+                    )
+                ),
+            )
+            logger.info(f"Binary Quantization enabled on collection '{self.COLLECTION_NAME}'")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to enable Binary Quantization: {e}")
+            return False
+    
+    def get_quantization_info(self) -> Dict[str, Any]:
+        """Get current quantization configuration."""
+        try:
+            info = self.client.get_collection(self.COLLECTION_NAME)
+            quant_config = info.config.quantization_config
+            
+            if quant_config is None:
+                return {"enabled": False, "type": None}
+            
+            # Check type of quantization
+            if hasattr(quant_config, 'binary'):
+                return {
+                    "enabled": True,
+                    "type": "binary",
+                    "always_ram": quant_config.binary.always_ram if quant_config.binary else False,
+                }
+            elif hasattr(quant_config, 'scalar'):
+                return {
+                    "enabled": True,
+                    "type": "scalar",
+                }
+            
+            return {"enabled": True, "type": "unknown"}
+            
+        except Exception as e:
+            logger.error(f"Error getting quantization info: {e}")
+            return {"enabled": False, "error": str(e)}
 
 
 # Convenience function for creating store
