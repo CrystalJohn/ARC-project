@@ -35,6 +35,22 @@ EN_KEYWORDS = {
     'please', 'help', 'need', 'want', 'like', 'know', 'think', 'understand'
 }
 
+# Translation/follow-up request patterns
+TRANSLATION_PATTERNS_VI = [
+    'dịch sang tiếng việt', 'dịch sang tiếng anh', 'dịch lại',
+    'nói bằng tiếng việt', 'nói bằng tiếng anh', 'trả lời bằng tiếng việt',
+    'trả lời bằng tiếng anh', 'chuyển sang tiếng việt', 'chuyển sang tiếng anh',
+    'viết lại bằng tiếng việt', 'viết lại bằng tiếng anh'
+]
+
+TRANSLATION_PATTERNS_EN = [
+    'translate to vietnamese', 'translate to english', 'translate it',
+    'say it in vietnamese', 'say it in english', 'respond in vietnamese',
+    'respond in english', 'switch to vietnamese', 'switch to english',
+    'rewrite in vietnamese', 'rewrite in english', 'in vietnamese please',
+    'in english please'
+]
+
 
 @dataclass
 class LanguageContext:
@@ -44,6 +60,41 @@ class LanguageContext:
     conversation_language: Optional[str] = None  # Primary language of conversation
     user_preference: Optional[str] = None  # Explicit user preference
     language_switched: bool = False  # Whether language was switched
+    is_translation_request: bool = False  # Whether this is a translation/follow-up request
+    target_language: Optional[str] = None  # Target language for translation
+
+
+def is_translation_request(text: str) -> tuple[bool, Optional[str]]:
+    """
+    Check if query is a translation/language switch request.
+    
+    Args:
+        text: Query text to analyze
+        
+    Returns:
+        Tuple of (is_translation, target_language)
+    """
+    text_lower = text.lower().strip()
+    
+    # Check Vietnamese patterns
+    for pattern in TRANSLATION_PATTERNS_VI:
+        if pattern in text_lower:
+            if 'tiếng anh' in text_lower or 'english' in text_lower:
+                return True, "en"
+            elif 'tiếng việt' in text_lower or 'vietnamese' in text_lower:
+                return True, "vi"
+            return True, "vi"  # Default to Vietnamese for Vietnamese patterns
+    
+    # Check English patterns
+    for pattern in TRANSLATION_PATTERNS_EN:
+        if pattern in text_lower:
+            if 'vietnamese' in text_lower or 'tiếng việt' in text_lower:
+                return True, "vi"
+            elif 'english' in text_lower or 'tiếng anh' in text_lower:
+                return True, "en"
+            return True, "en"  # Default to English for English patterns
+    
+    return False, None
 
 
 def detect_query_language(text: str) -> str:
@@ -134,9 +185,10 @@ def get_language_context(
     Intelligent language detection with conversation context.
     
     Priority:
-    1. Explicit user preference (if set)
-    2. Conversation language (from history)
-    3. Current query language
+    1. Translation request detection (highest priority)
+    2. Explicit user preference (if set)
+    3. Conversation language (from history)
+    4. Current query language
     
     Args:
         query: Current user query
@@ -149,13 +201,26 @@ def get_language_context(
     # Detect current query language
     query_lang = detect_query_language(query)
     
-    # Check user preference first
+    # ✅ Check for translation request FIRST
+    is_trans, target_lang = is_translation_request(query)
+    if is_trans and target_lang:
+        return LanguageContext(
+            query_language=query_lang,
+            response_language=target_lang,
+            conversation_language=target_lang,
+            language_switched=True,
+            is_translation_request=True,
+            target_language=target_lang
+        )
+    
+    # Check user preference
     if user_language_preference and user_language_preference in ("vi", "en"):
         return LanguageContext(
             query_language=query_lang,
             response_language=user_language_preference,
             user_preference=user_language_preference,
-            language_switched=False
+            language_switched=False,
+            is_translation_request=False
         )
     
     # Analyze conversation history
@@ -168,7 +233,8 @@ def get_language_context(
                 query_language=query_lang,
                 response_language=query_lang,  # Switch to new language
                 conversation_language=query_lang,
-                language_switched=True
+                language_switched=True,
+                is_translation_request=False
             )
         
         # Continue in conversation language
@@ -176,7 +242,8 @@ def get_language_context(
             query_language=query_lang,
             response_language=conversation_lang,
             conversation_language=conversation_lang,
-            language_switched=False
+            language_switched=False,
+            is_translation_request=False
         )
     
     # First message: use query language
@@ -184,7 +251,8 @@ def get_language_context(
         query_language=query_lang,
         response_language=query_lang,
         conversation_language=query_lang,
-        language_switched=False
+        language_switched=False,
+        is_translation_request=False
     )
 
 

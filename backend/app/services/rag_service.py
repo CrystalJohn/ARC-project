@@ -827,6 +827,96 @@ class RAGService:
             temperature=temperature,
         )
     
+    def _handle_translation_request(
+        self,
+        query: str,
+        history: List[Dict[str, str]],
+        lang_context: LanguageContext,
+        max_tokens: int = 2048,
+        temperature: float = 0.7,
+        stream: bool = False,
+    ) -> RAGResponse:
+        """
+        Handle translation/language switch requests.
+        
+        Instead of searching RAG, uses the last assistant response
+        and translates it to the target language.
+        
+        Args:
+            query: User's translation request
+            history: Conversation history
+            lang_context: Language context with target language
+            max_tokens: Maximum output tokens
+            temperature: Sampling temperature
+            stream: Whether to stream response
+            
+        Returns:
+            RAGResponse with translated content
+        """
+        # Find last assistant message to translate
+        last_assistant_msg = None
+        for msg in reversed(history):
+            if msg.get("role") == "assistant":
+                last_assistant_msg = msg.get("content", "")
+                break
+        
+        if not last_assistant_msg:
+            # No previous response to translate
+            if lang_context.target_language == "vi":
+                return RAGResponse(
+                    answer="Không có câu trả lời trước đó để dịch.",
+                    citations=[],
+                    usage=TokenUsage(input_tokens=0, output_tokens=0),
+                    model=self.claude_service.model_alias,
+                    contexts_used=0,
+                    query=query,
+                )
+            else:
+                return RAGResponse(
+                    answer="No previous response to translate.",
+                    citations=[],
+                    usage=TokenUsage(input_tokens=0, output_tokens=0),
+                    model=self.claude_service.model_alias,
+                    contexts_used=0,
+                    query=query,
+                )
+        
+        # Build translation prompt
+        if lang_context.target_language == "vi":
+            system_prompt = """Bạn là trợ lý dịch thuật chuyên nghiệp.
+Dịch nội dung sau sang tiếng Việt một cách tự nhiên và chính xác.
+Giữ nguyên format, citations [1], [2], và thuật ngữ kỹ thuật quan trọng."""
+            prompt = f"Dịch nội dung sau sang tiếng Việt:\n\n{last_assistant_msg}"
+        else:
+            system_prompt = """You are a professional translation assistant.
+Translate the following content to English naturally and accurately.
+Preserve the format, citations [1], [2], and important technical terms."""
+            prompt = f"Translate the following to English:\n\n{last_assistant_msg}"
+        
+        # Generate translation
+        response = self.claude_service.invoke(
+            prompt=prompt,
+            system_prompt=system_prompt,
+            history=None,  # Don't include history for translation
+            max_tokens=max_tokens,
+            temperature=temperature,
+        )
+        
+        # Add language switch notification
+        if lang_context.target_language == "vi":
+            prefix = "📝 **Bản dịch tiếng Việt:**\n\n"
+        else:
+            prefix = "📝 **English translation:**\n\n"
+        
+        return RAGResponse(
+            answer=prefix + response.text,
+            citations=[],  # No new citations for translation
+            usage=response.usage,
+            model=response.model,
+            contexts_used=0,
+            query=query,
+        )
+    
     # ✅ OPTIMIZED FOR PRECISION
     def query(
         self,
@@ -848,6 +938,7 @@ class RAGService:
         - score_threshold=0.3 (30%) balanced for recall
         - Only returns results that are truly relevant to the query
         - Bilingual support with conversation-aware language detection
+        - Translation request handling (uses history instead of RAG search)
         
         Args:
             query: User query
@@ -863,6 +954,24 @@ class RAGService:
         Returns:
             RAGResponse or Generator[StreamChunk] if streaming
         """
+        # ✅ Check for translation request FIRST
+        lang_context = get_language_context(
+            query=query,
+            history=history,
+            user_language_preference=language_preference
+        )
+        
+        if lang_context.is_translation_request and history:
+            logger.info(f"Translation request detected: translating to {lang_context.target_language}")
+            return self._handle_translation_request(
+                query=query,
+                history=history,
+                lang_context=lang_context,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                stream=stream,
+            )
+        
         # Retrieve contexts with improved settings
         contexts = self.retrieve_contexts(
             query=query,
