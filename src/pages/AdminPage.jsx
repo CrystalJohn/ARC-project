@@ -2,16 +2,9 @@ import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { adminService } from '../services/adminService'
 import { authService } from '../services/authService'
-import { 
-  Card, 
-  CardBody, 
-  Chip, 
-  Progress,
-  Checkbox,
-  Spinner,
-  Pagination
-} from '@heroui/react'
+import { Card, CardBody, Progress, Checkbox, Spinner, Pagination } from '@heroui/react'
 import { motion, AnimatePresence } from 'framer-motion'
+import Sidebar from '../components/Sidebar'
 
 function AdminPage() {
   const navigate = useNavigate()
@@ -27,6 +20,11 @@ function AdminPage() {
   const [totalDocs, setTotalDocs] = useState(0)
   const [autoRefresh, setAutoRefresh] = useState(true)
   const [activeMenu, setActiveMenu] = useState('documents')
+  const [user, setUser] = useState(null)
+
+  useEffect(() => {
+    loadUser()
+  }, [])
 
   useEffect(() => {
     fetchDocuments()
@@ -38,7 +36,12 @@ function AdminPage() {
     return () => clearInterval(interval)
   }, [autoRefresh, page, statusFilter])
 
-  const PAGE_SIZE = 5 // Mỗi trang tối đa 5 dòng
+  const loadUser = async () => {
+    const currentUser = await authService.getCurrentUser()
+    setUser(currentUser)
+  }
+
+  const PAGE_SIZE = 5
 
   const fetchDocuments = async (silent = false) => {
     try {
@@ -47,7 +50,7 @@ function AdminPage() {
       const data = await adminService.listDocuments({
         page,
         pageSize: PAGE_SIZE,
-        status: statusFilter === 'all' ? null : statusFilter
+        status: statusFilter === 'all' ? null : statusFilter,
       })
       setDocuments(data.items)
       setTotalPages(Math.ceil(data.total / PAGE_SIZE))
@@ -79,95 +82,65 @@ function AdminPage() {
   }
 
   const handleFiles = async (files) => {
-    const pdfFiles = files.filter(f => f.type === 'application/pdf' || f.name.toLowerCase().endsWith('.pdf'))
+    const pdfFiles = files.filter(
+      (f) => f.type === 'application/pdf' || f.name.toLowerCase().endsWith('.pdf')
+    )
     if (pdfFiles.length === 0) return alert('Please select PDF files only')
 
     setUploading(true)
-    setUploadProgress(pdfFiles.map(f => ({ filename: f.name, size: f.size, status: 'uploading', progress: 0 })))
+    setUploadProgress(
+      pdfFiles.map((f) => ({ filename: f.name, size: f.size, status: 'uploading', progress: 0 }))
+    )
 
     for (let i = 0; i < pdfFiles.length; i++) {
       try {
-        setUploadProgress(prev => prev.map((p, idx) => idx === i ? { ...p, progress: 65 } : p))
+        setUploadProgress((prev) =>
+          prev.map((p, idx) => (idx === i ? { ...p, progress: 65 } : p))
+        )
         await adminService.uploadDocument(pdfFiles[i])
-        setUploadProgress(prev => prev.map((p, idx) => idx === i ? { ...p, status: 'success', progress: 100 } : p))
+        setUploadProgress((prev) =>
+          prev.map((p, idx) => (idx === i ? { ...p, status: 'success', progress: 100 } : p))
+        )
       } catch (err) {
-        setUploadProgress(prev => prev.map((p, idx) => idx === i ? { ...p, status: 'error', error: err.message } : p))
+        setUploadProgress((prev) =>
+          prev.map((p, idx) => (idx === i ? { ...p, status: 'error', error: err.message } : p))
+        )
       }
     }
     setUploading(false)
     setTimeout(() => fetchDocuments(), 2000)
   }
 
-  const removeUploadItem = (idx) => setUploadProgress(prev => prev.filter((_, i) => i !== idx))
+  const removeUploadItem = (idx) => setUploadProgress((prev) => prev.filter((_, i) => i !== idx))
 
   const formatFileSize = (bytes) => {
     if (!bytes) return '0 B'
-    const k = 1024, sizes = ['B', 'KB', 'MB', 'GB']
+    const k = 1024,
+      sizes = ['B', 'KB', 'MB', 'GB']
     const i = Math.floor(Math.log(bytes) / Math.log(k))
     return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i]
   }
 
-  const getStatusChip = (status) => {
+  const getStatusBadge = (status) => {
     const config = {
-      'UPLOADED': { color: 'default' },
-      'IDP_RUNNING': { color: 'warning' },
-      'EMBEDDING_DONE': { color: 'success' },
-      'FAILED': { color: 'danger' }
-    }[status] || { color: 'default' }
-    return <Chip size="sm" color={config.color} variant="flat">{status}</Chip>
-  }
+      UPLOADED: { text: 'text-gray-600', dot: 'bg-gray-400' },
+      IDP_RUNNING: { text: 'text-orange-600', dot: 'bg-orange-500' },
+      EMBEDDING_DONE: { text: 'text-emerald-600', dot: 'bg-emerald-500' },
+      FAILED: { text: 'text-red-600', dot: 'bg-red-500' },
+    }[status] || { text: 'text-gray-600', dot: 'bg-gray-400' }
 
-  const handleLogout = async () => {
-    await authService.logout()
-    navigate('/login')
+    return (
+      <span className={`inline-flex items-center gap-2 text-sm font-medium ${config.text}`}>
+        <span className={`w-2 h-2 rounded-full ${config.dot}`}></span>
+        {status}
+      </span>
+    )
   }
-
-  const menuItems = [
-    { id: 'dashboard', label: 'Dashboard', icon: '📊' },
-    { id: 'chatbot', label: 'Chatbot', icon: '💬', onClick: () => navigate('/chat') },
-    { id: 'documents', label: 'Document Management', icon: '📄' },
-    { id: 'users', label: 'Users', icon: '👥' },
-    { id: 'settings', label: 'Settings', icon: '⚙️' },
-  ]
 
   return (
-    <div className="flex min-h-screen bg-gray-50">
-      {/* Sidebar */}
-      <div className="w-64 bg-white border-r flex flex-col">
-        <div className="p-4 border-b">
-          <div className="flex items-center gap-3">
-            <div className="w-8 h-8 bg-blue-500 rounded-lg flex items-center justify-center text-white font-bold text-sm">ARC</div>
-            <div>
-              <h1 className="font-semibold text-gray-800">ARC Chatbot</h1>
-              <p className="text-xs text-gray-500">Researcher Portal</p>
-            </div>
-          </div>
-        </div>
-        <nav className="flex-1 p-4 space-y-1">
-          {menuItems.map((item) => (
-            <button
-              key={item.id}
-              onClick={item.onClick || (() => setActiveMenu(item.id))}
-              className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-colors ${
-                activeMenu === item.id ? 'bg-blue-50 text-blue-600 font-medium' : 'text-gray-600 hover:bg-gray-100'
-              }`}
-            >
-              <span>{item.icon}</span>
-              <span>{item.label}</span>
-            </button>
-          ))}
-        </nav>
-        <div className="p-4 border-t space-y-1">
-          <button className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm text-gray-600 hover:bg-gray-100">
-            <span>❓</span><span>Help</span>
-          </button>
-          <button onClick={handleLogout} className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm text-gray-600 hover:bg-gray-100">
-            <span>🚪</span><span>Logout</span>
-          </button>
-        </div>
-      </div>
+    <div className="flex min-h-screen bg-slate-100">
+      <Sidebar activeMenu={activeMenu} setActiveMenu={setActiveMenu} user={user} />
 
-      {/* Main Content */}
       <div className="flex-1 p-8">
         <h1 className="text-2xl font-bold text-gray-800 mb-8">Document Management</h1>
 
@@ -195,18 +168,10 @@ function AdminPage() {
                 <span className="px-6 py-2.5 bg-blue-500 hover:bg-blue-600 text-white font-medium rounded-lg transition-colors">
                   Browse Files
                 </span>
-                <input 
-                  type="file" 
-                  className="hidden" 
-                  accept=".pdf" 
-                  multiple 
-                  disabled={uploading} 
-                  onChange={handleFileInput} 
-                />
+                <input type="file" className="hidden" accept=".pdf" multiple disabled={uploading} onChange={handleFileInput} />
               </label>
             </div>
 
-            {/* Upload Progress */}
             <AnimatePresence>
               {uploadProgress.length > 0 && (
                 <div className="mt-4 space-y-3">
@@ -227,7 +192,7 @@ function AdminPage() {
                       </div>
                       <div className="flex-1 min-w-0">
                         <p className="text-sm font-medium text-gray-800 truncate">{item.filename}</p>
-                        {item.status === 'uploading' && <p className="text-xs text-gray-500">{formatFileSize(item.size * item.progress / 100)} of {formatFileSize(item.size)}</p>}
+                        {item.status === 'uploading' && <p className="text-xs text-gray-500">{formatFileSize((item.size * item.progress) / 100)} of {formatFileSize(item.size)}</p>}
                         {item.status === 'success' && <p className="text-xs text-green-600">Upload Complete</p>}
                         {item.status === 'error' && <p className="text-xs text-red-600">Upload Failed</p>}
                       </div>
@@ -264,18 +229,33 @@ function AdminPage() {
           </CardBody>
         </Card>
 
-        {/* Documents Table */}
+        {/* Documents Table - Redesigned */}
         <Card>
-          <CardBody className="p-6">
-            <div className="flex items-center justify-between mb-6">
-              <h2 className="text-lg font-semibold">All Documents</h2>
+          <CardBody className="p-0">
+            {/* Header */}
+            <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+              <div className="flex items-center gap-4">
+                <h2 className="text-lg font-semibold text-gray-800">All Documents</h2>
+                <button
+                  onClick={() => navigate('/admin/processing-history')}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm text-blue-600 hover:text-blue-700 hover:bg-blue-50 rounded-lg transition-colors"
+                >
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                  </svg>
+                  Processing History
+                  <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                  </svg>
+                </button>
+              </div>
               <div className="flex items-center gap-4">
                 <div className="flex items-center gap-2">
-                  <span className="text-sm text-gray-600">Status:</span>
-                  <select 
-                    value={statusFilter} 
-                    onChange={(e) => setStatusFilter(e.target.value)} 
-                    className="w-40 px-3 py-1.5 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  <span className="text-sm text-gray-500">Status:</span>
+                  <select
+                    value={statusFilter}
+                    onChange={(e) => setStatusFilter(e.target.value)}
+                    className="px-3 py-1.5 text-sm border border-gray-200 rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
                   >
                     <option value="all">All</option>
                     <option value="UPLOADED">Uploaded</option>
@@ -284,81 +264,121 @@ function AdminPage() {
                     <option value="FAILED">Failed</option>
                   </select>
                 </div>
-                <Checkbox isSelected={autoRefresh} onValueChange={setAutoRefresh} size="sm">
-                  <span className="text-sm text-gray-600">Auto-refresh (5s)</span>
-                </Checkbox>
-                <button 
-                  onClick={() => fetchDocuments()} 
+                <div className="flex items-center gap-2">
+                  <Checkbox isSelected={autoRefresh} onValueChange={setAutoRefresh} size="sm" />
+                  <span className="text-sm text-gray-500">Auto-refresh (5s)</span>
+                </div>
+                <button
+                  onClick={() => fetchDocuments()}
                   disabled={loading}
-                  className="p-2 hover:bg-gray-100 rounded-lg transition-colors disabled:opacity-50"
+                  className="p-2 text-blue-500 hover:bg-blue-50 rounded-lg transition-colors disabled:opacity-50"
+                  title="Refresh"
                 >
-                  {loading ? <Spinner size="sm" /> : '🔄'}
+                  {loading ? <Spinner size="sm" /> : (
+                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                    </svg>
+                  )}
                 </button>
               </div>
             </div>
 
             {loading && documents.length === 0 ? (
-              <div className="flex items-center justify-center py-12"><Spinner size="lg" /></div>
+              <div className="flex items-center justify-center py-16">
+                <Spinner size="lg" />
+              </div>
             ) : error ? (
-              <div className="p-6 bg-red-50 rounded-lg text-center">
-                <p className="text-red-800">⚠️ {error}</p>
-                <button 
-                  onClick={() => fetchDocuments()} 
-                  className="mt-2 px-4 py-1.5 text-sm text-red-600 hover:text-red-700 hover:bg-red-100 rounded-lg transition-colors"
-                >
+              <div className="p-8 text-center">
+                <p className="text-red-600 mb-2">⚠️ {error}</p>
+                <button onClick={() => fetchDocuments()} className="text-sm text-blue-500 hover:underline">
                   Try again
                 </button>
               </div>
             ) : documents.length === 0 ? (
-              <div className="py-12 text-center">
+              <div className="py-16 text-center">
+                <svg className="w-16 h-16 mx-auto text-gray-300 mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                </svg>
                 <p className="text-gray-500">No documents found</p>
                 <p className="text-sm text-gray-400 mt-1">Upload some PDFs to get started</p>
               </div>
             ) : (
               <>
+                {/* Table */}
                 <div className="overflow-x-auto">
                   <table className="w-full">
                     <thead>
-                      <tr className="border-b">
-                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Filename</th>
-                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Doc ID</th>
-                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
-                        <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Page Count</th>
-                        <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Chunk Count</th>
-                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Upload Time</th>
+                      <tr className="border-b border-gray-200">
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">Filename</th>
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">Doc ID</th>
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">Status</th>
+                        <th className="px-6 py-3 text-center text-xs font-medium text-gray-400 uppercase tracking-wider">Page Count</th>
+                        <th className="px-6 py-3 text-center text-xs font-medium text-gray-400 uppercase tracking-wider">Chunk Count</th>
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">Upload Time</th>
+                        <th className="px-6 py-3 text-center text-xs font-medium text-gray-400 uppercase tracking-wider">Actions</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-gray-100">
-                      {documents.map((doc) => (
-                        <tr key={doc.doc_id} className="hover:bg-gray-50">
-                          <td className="px-4 py-4 text-sm font-medium text-gray-800">{doc.filename}</td>
-                          <td className="px-4 py-4 text-sm text-gray-500 font-mono">doc_{doc.doc_id.slice(0, 7)}</td>
-                          <td className="px-4 py-4">{getStatusChip(doc.status)}</td>
-                          <td className="px-4 py-4 text-center text-sm text-gray-600">{doc.page_count || 0}</td>
-                          <td className="px-4 py-4 text-center text-sm text-gray-600">{doc.chunk_count || 0}</td>
-                          <td className="px-4 py-4 text-sm text-gray-600">
-                            {new Date(doc.uploaded_at).toLocaleString('en-US', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: true })}
+                      {documents.map((doc, idx) => (
+                        <motion.tr
+                          key={doc.doc_id}
+                          initial={{ opacity: 0 }}
+                          animate={{ opacity: 1 }}
+                          transition={{ delay: idx * 0.05 }}
+                          className="hover:bg-gray-50/50 transition-colors"
+                        >
+                          <td className="px-6 py-4">
+                            <p className="text-sm font-medium text-gray-800 truncate max-w-xs" title={doc.filename}>
+                              {doc.filename}
+                            </p>
                           </td>
-                        </tr>
+                          <td className="px-6 py-4">
+                            <span className="text-sm text-gray-500 font-mono">doc_{doc.doc_id.slice(0, 7)}</span>
+                          </td>
+                          <td className="px-6 py-4">{getStatusBadge(doc.status)}</td>
+                          <td className="px-6 py-4 text-center text-sm text-gray-600">{doc.page_count || 0}</td>
+                          <td className="px-6 py-4 text-center text-sm text-gray-600">{doc.chunk_count || 0}</td>
+                          <td className="px-6 py-4 text-sm text-gray-500">
+                            {new Date(doc.uploaded_at).toLocaleString('en-US', {
+                              month: '2-digit',
+                              day: '2-digit',
+                              year: 'numeric',
+                              hour: '2-digit',
+                              minute: '2-digit',
+                              hour12: true,
+                            })}
+                          </td>
+                          <td className="px-6 py-4">
+                            <div className="flex items-center justify-center gap-1">
+                              <button className="p-2 text-gray-400 hover:text-blue-600 transition-colors" title="View">
+                                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                                </svg>
+                              </button>
+                              <button className="p-2 text-gray-400 hover:text-red-500 transition-colors" title="Delete">
+                                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                                </svg>
+                              </button>
+                            </div>
+                          </td>
+                        </motion.tr>
                       ))}
                     </tbody>
                   </table>
                 </div>
-                <div className="flex items-center justify-between mt-6 pt-4 border-t">
-                  <p className="text-sm text-gray-600">
-                    Showing <span className="font-medium">{(page - 1) * PAGE_SIZE + 1}-{Math.min(page * PAGE_SIZE, totalDocs)}</span> of <span className="font-medium">{totalDocs}</span>
+
+                {/* Footer */}
+                <div className="flex items-center justify-between px-6 py-4 border-t border-gray-100">
+                  <p className="text-sm text-gray-500">
+                    Showing <span className="font-medium text-emerald-600">{(page - 1) * PAGE_SIZE + 1}-{Math.min(page * PAGE_SIZE, totalDocs)}</span> of <span className="font-medium text-emerald-600">{totalDocs}</span>
                   </p>
-                  {totalPages > 1 && (
-                    <Pagination 
-                      total={totalPages} 
-                      page={page} 
-                      onChange={setPage} 
-                      showControls 
-                      size="sm"
-                      initialPage={1}
-                      color="primary"
-                    />
-                  )}
+                  <div className="flex items-center gap-4">
+                    {totalPages > 1 && (
+                      <Pagination total={totalPages} page={page} onChange={setPage} showControls size="sm" color="primary" />
+                    )}
+                  </div>
                 </div>
               </>
             )}

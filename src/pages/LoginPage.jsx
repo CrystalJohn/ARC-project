@@ -57,6 +57,13 @@ function LoginPage() {
       }
     } catch (err) {
       console.error('Login failed:', err)
+      
+      // Check if user needs to confirm email
+      if (err.message?.includes('CONFIRM_SIGN_UP') || err.message?.includes('not confirmed')) {
+        navigate('/verify-email', { state: { email } })
+        return
+      }
+      
       setError(err.message)
     } finally {
       setLoading(false)

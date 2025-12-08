@@ -63,6 +63,14 @@ class DocumentItem(BaseModel):
     error_message: Optional[str] = None
 
 
+class DocumentStats(BaseModel):
+    total: int = 0
+    completed: int = 0
+    processing: int = 0
+    failed: int = 0
+    uploaded: int = 0
+
+
 class DocumentListResponse(BaseModel):
     items: list[DocumentItem]
     total: int
@@ -70,6 +78,7 @@ class DocumentListResponse(BaseModel):
     page_size: int
     has_more: bool
     next_cursor: Optional[str] = None  # Cursor for next page (base64 encoded)
+    stats: Optional[DocumentStats] = None  # Overall stats across all documents
 
 
 # Initialize AWS clients
@@ -246,28 +255,22 @@ async def upload_document(
 
 @router.get("/documents", response_model=DocumentListResponse)
 async def list_documents(
-    page: int = Query(default=1, ge=1, description="Page number (for display only)"),
+    page: int = Query(default=1, ge=1, description="Page number"),
     page_size: int = Query(default=20, ge=1, le=100, description="Items per page"),
     status: Optional[str] = Query(default=None, description="Filter by status"),
-    cursor: Optional[str] = Query(default=None, description="Pagination cursor (base64 encoded)"),
     admin_user: CurrentUser = Depends(require_admin),  # ✅ Require admin role
 ):
     """
-    List documents with cursor-based pagination.
+    List documents with page-based pagination.
     
     REQUIRES: Admin role (Cognito 'admin' group)
     
-    Uses DynamoDB native pagination (cursor-based) for efficiency.
-    - First request: no cursor
-    - Next page: use cursor from previous response
+    Documents are sorted by uploaded_at descending (newest first).
     
     Filter by status: UPLOADED, IDP_RUNNING, EMBEDDING_DONE, FAILED
     
     Requirements: 11.1, 11.2, 11.3, 11.4
     """
-    import base64
-    import json
-    
     status_manager = get_status_manager()
     
     # Validate status filter
@@ -281,19 +284,11 @@ async def list_documents(
                 detail=f"Invalid status. Must be one of: {[s.value for s in DocumentStatus]}"
             )
     
-    # Decode cursor if provided
-    last_evaluated_key = None
-    if cursor:
-        try:
-            last_evaluated_key = json.loads(base64.b64decode(cursor).decode())
-        except Exception:
-            raise HTTPException(status_code=400, detail="Invalid cursor")
-    
-    # Query DynamoDB with proper pagination (no memory pagination!)
+    # Query with page-based pagination (sorted by uploaded_at desc)
     result = status_manager.list_documents(
         status=status_filter,
         page_size=page_size,
-        last_evaluated_key=last_evaluated_key,
+        page=page,
     )
     
     # Convert to response items
@@ -311,23 +306,24 @@ async def list_documents(
         for doc in result["items"]
     ]
     
-    # Sort by uploaded_at descending (in case GSI doesn't sort)
-    items.sort(key=lambda x: x.uploaded_at, reverse=True)
-    
-    # Encode next cursor
-    next_cursor = None
-    if result.get("last_evaluated_key"):
-        next_cursor = base64.b64encode(
-            json.dumps(result["last_evaluated_key"]).encode()
-        ).decode()
+    # Build stats from result
+    stats_data = result.get("stats", {})
+    stats = DocumentStats(
+        total=stats_data.get("total", 0),
+        completed=stats_data.get("completed", 0),
+        processing=stats_data.get("processing", 0),
+        failed=stats_data.get("failed", 0),
+        uploaded=stats_data.get("uploaded", 0),
+    )
     
     return DocumentListResponse(
         items=items,
-        total=len(items),  # Note: total is items in this page (DynamoDB doesn't give total count efficiently)
+        total=result.get("total", len(items)),
         page=page,
         page_size=page_size,
         has_more=result.get("has_more", False),
-        next_cursor=next_cursor,  # Add cursor to response
+        next_cursor=None,  # Not used with page-based pagination
+        stats=stats,
     )
 
 

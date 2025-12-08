@@ -332,7 +332,7 @@ class ChatHistoryManager:
         last_evaluated_key: Optional[Dict] = None,
     ) -> Dict[str, Any]:
         """
-        List conversations for a user.
+        List conversations for a user with title and message count.
         
         Args:
             user_id: User identifier
@@ -343,6 +343,7 @@ class ChatHistoryManager:
             Dict with conversations and pagination info
         """
         try:
+            # Get all messages for user to group by conversation
             params = {
                 "TableName": self.table_name,
                 "KeyConditionExpression": "user_id = :uid AND begins_with(sk, :prefix)",
@@ -350,7 +351,6 @@ class ChatHistoryManager:
                     ":uid": {"S": user_id},
                     ":prefix": {"S": "CONV#"},
                 },
-                "Limit": limit * 2,  # Get more to deduplicate
                 "ScanIndexForward": False,  # Newest first
             }
             
@@ -359,25 +359,57 @@ class ChatHistoryManager:
             
             response = self._client.query(**params)
             
-            # Group by conversation_id and get latest message
-            conversations = {}
+            # Group messages by conversation_id
+            conv_messages: Dict[str, List[ChatMessage]] = {}
             for item in response.get("Items", []):
                 conv_id = item.get("conversation_id", {}).get("S")
-                if conv_id and conv_id not in conversations:
+                if conv_id:
                     msg = self._parse_message(item)
-                    conversations[conv_id] = {
-                        "conversation_id": conv_id,
-                        "user_id": user_id,
-                        "last_message": msg.content[:100] + "..." if len(msg.content) > 100 else msg.content,
-                        "last_message_at": msg.created_at,
-                        "last_role": msg.role.value if isinstance(msg.role, MessageRole) else msg.role,
-                    }
-                    if len(conversations) >= limit:
-                        break
+                    if conv_id not in conv_messages:
+                        conv_messages[conv_id] = []
+                    conv_messages[conv_id].append(msg)
+            
+            # Build conversation list with title and message_count
+            conversations = []
+            for conv_id, messages in conv_messages.items():
+                # Sort messages by created_at ascending to find first user message
+                messages.sort(key=lambda m: m.created_at)
+                
+                # Find first user message for title
+                first_user_msg = next(
+                    (m for m in messages if (m.role == MessageRole.USER or m.role == "user")),
+                    None
+                )
+                title = "New conversation"
+                if first_user_msg:
+                    # Use first 50 chars of first user message as title
+                    title = first_user_msg.content[:50]
+                    if len(first_user_msg.content) > 50:
+                        title += "..."
+                
+                # Get last message info
+                last_msg = messages[-1] if messages else None
+                
+                conversations.append({
+                    "conversation_id": conv_id,
+                    "user_id": user_id,
+                    "title": title,
+                    "message_count": len(messages),
+                    "last_message": last_msg.content[:100] + "..." if last_msg and len(last_msg.content) > 100 else (last_msg.content if last_msg else ""),
+                    "last_message_at": last_msg.created_at if last_msg else "",
+                    "last_role": last_msg.role.value if last_msg and isinstance(last_msg.role, MessageRole) else (last_msg.role if last_msg else ""),
+                })
+                
+                if len(conversations) >= limit:
+                    break
+            
+            # Sort by last_message_at descending
+            conversations.sort(key=lambda c: c.get("last_message_at", ""), reverse=True)
             
             return {
-                "conversations": list(conversations.values()),
+                "conversations": conversations[:limit],
                 "last_evaluated_key": response.get("LastEvaluatedKey"),
+                "has_more": len(conversations) > limit or response.get("LastEvaluatedKey") is not None,
             }
             
         except ClientError as e:

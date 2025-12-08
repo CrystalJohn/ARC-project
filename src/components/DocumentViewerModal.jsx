@@ -72,7 +72,8 @@ function DocumentViewerModal({ citation, onClose, query = '' }) {
       setLoading(true)
       const token = await authService.getAccessToken()
       
-      const response = await fetch(`${apiUrl}/api/admin/documents/${citation.doc_id}`, {
+      // Use chat endpoint for regular users (doesn't require admin)
+      const response = await fetch(`${apiUrl}/api/chat/document/${citation.doc_id}`, {
         headers: {
           'Authorization': `Bearer ${token}`
         }

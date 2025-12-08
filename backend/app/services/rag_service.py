@@ -32,6 +32,7 @@ from app.services.claude_service import (
     TokenUsage,
 )
 from app.services.bm25_search import BM25Index, HybridRetriever, BM25Result
+from app.services.document_status_manager import DocumentStatusManager
 from app.services.language_context import (
     LanguageContext,
     get_language_context,
@@ -160,22 +161,51 @@ HƯỚNG DẪN QUAN TRỌNG:
 1. ĐỌC CÂU HỎI CỦA NGƯỜI DÙNG CẨN THẬN - hiểu họ đang hỏi gì cụ thể
 2. TẬP TRUNG TRẢ LỜI trực tiếp vào câu hỏi cụ thể của họ
 3. TRÍCH XUẤT thông tin liên quan nhất từ ngữ cảnh để trả lời câu hỏi
-4. BẮT ĐẦU với câu trả lời trực tiếp, sau đó cung cấp chi tiết hỗ trợ
-5. LUÔN trích dẫn nguồn bằng [1], [2], v.v. cho MỌI thông tin
-6. Nếu ngữ cảnh KHÔNG chứa câu trả lời, nói "Tài liệu được cung cấp không chứa thông tin cụ thể về [chủ đề]"
+4. LUÔN trích dẫn nguồn bằng [1], [2], v.v. cho MỌI thông tin
+5. Nếu ngữ cảnh KHÔNG chứa câu trả lời, nói "Tài liệu được cung cấp không chứa thông tin cụ thể về [chủ đề]"
 
 ƯU TIÊN TRÍCH DẪN (QUAN TRỌNG):
-- Trích dẫn được sắp xếp theo độ liên quan: [1] = điểm CAO NHẤT, [2] = cao thứ hai, v.v.
+- Trích dẫn được sắp xếp theo độ liên quan: [1] = điểm CAO NHẤT
 - ƯU TIÊN sử dụng [1] trong câu trả lời vì đây là ngữ cảnh liên quan nhất
-- Sử dụng TẤT CẢ trích dẫn được cung cấp khi có thể, đặc biệt là những trích dẫn có điểm cao
-- Nếu [1] không trả lời trực tiếp câu hỏi, vẫn tham chiếu nếu liên quan
 
-CẤU TRÚC TRẢ LỜI:
-- Câu đầu tiên: Trả lời trực tiếp câu hỏi của người dùng
-- Các câu tiếp theo: Bằng chứng hỗ trợ từ ngữ cảnh với trích dẫn
-- Tập trung vào những gì người dùng hỏi - không cung cấp thông tin không liên quan
+ĐỊNH DẠNG TRẢ LỜI (BẮT BUỘC - PHẢI TUÂN THỦ):
+LUÔN sử dụng markdown với XUỐNG DÒNG rõ ràng giữa các phần:
 
-Nhớ: Mục tiêu của bạn là trả lời câu hỏi CỤ THỂ được hỏi, không phải tóm tắt tất cả thông tin có sẵn.""",
+1. **LUÔN XUỐNG DÒNG** sau mỗi ý/câu quan trọng
+
+2. Nếu có lưu ý, bắt đầu với dòng riêng:
+⚠️ **Lưu ý:** [nội dung]
+
+3. Sử dụng heading trên DÒNG RIÊNG:
+
+## 📝 [Tiêu đề chính]
+
+### [Tiêu đề phụ]
+
+4. Các bước PHẢI trên dòng riêng:
+
+**Bước 1:** [Tên bước] [1]
+
+[Nội dung bước 1]
+
+**Bước 2:** [Tên bước] [2]
+
+[Nội dung bước 2]
+
+5. Code block trên dòng riêng:
+
+```java
+// Code example
+public class Example {}
+```
+
+6. Danh sách với mỗi item trên dòng riêng:
+
+- Điểm 1 [1]
+- Điểm 2 [2]
+- Điểm 3 [3]
+
+QUAN TRỌNG: KHÔNG viết tất cả trong 1 đoạn văn dài. PHẢI xuống dòng để dễ đọc.""",
 
     PromptTemplate.ACADEMIC: """Bạn là trợ lý nghiên cứu học thuật chuyên về phân tích nội dung khoa học.
 
@@ -237,6 +267,7 @@ class Citation:
     page: int
     text_snippet: str  # First 100 chars of source
     score: float
+    filename: str = ""  # Original filename for display
 
 
 @dataclass
@@ -303,6 +334,12 @@ INSTRUCTIONS:
 3. Add supporting details from [2], [3] as needed
 4. Cite EVERY piece of information with [1], [2], etc.
 5. If [1] doesn't directly answer the question, still reference it and explain why
+
+FORMAT (BẮT BUỘC):
+- PHẢI xuống dòng sau mỗi ý quan trọng
+- Sử dụng **bold** cho từ khóa
+- Sử dụng bullet points (-) cho danh sách
+- KHÔNG viết tất cả trong 1 đoạn văn dài
 
 YOUR FOCUSED ANSWER (must include [1]):"""
     
@@ -392,6 +429,10 @@ YOUR FOCUSED ANSWER (must include [1]):"""
         # Ensure contexts are ranked by score before extracting
         ranked_contexts = cls.rank_contexts_by_score(contexts)
         
+        # Lookup filenames from DynamoDB (batch for efficiency)
+        doc_ids = list(set(ctx.doc_id for ctx in ranked_contexts))
+        filename_map = cls._get_filenames_for_docs(doc_ids)
+        
         return [
             Citation(
                 id=ctx.citation_id,
@@ -400,9 +441,28 @@ YOUR FOCUSED ANSWER (must include [1]):"""
                 # Return full text (up to 1000 chars) for comprehensive citation display
                 text_snippet=ctx.text[:1000] + "..." if len(ctx.text) > 1000 else ctx.text,
                 score=ctx.score,
+                filename=filename_map.get(ctx.doc_id, ""),
             )
             for ctx in ranked_contexts
         ]
+    
+    @staticmethod
+    def _get_filenames_for_docs(doc_ids: List[str]) -> Dict[str, str]:
+        """Lookup filenames from DynamoDB for given doc_ids."""
+        if not doc_ids:
+            return {}
+        
+        try:
+            status_manager = DocumentStatusManager()
+            filename_map = {}
+            for doc_id in doc_ids:
+                doc = status_manager.get_document(doc_id)
+                if doc:
+                    filename_map[doc_id] = doc.get("filename", "")
+            return filename_map
+        except Exception as e:
+            logger.warning(f"Failed to lookup filenames: {e}")
+            return {}
 
 
 def validate_citations(answer: str, contexts: List[RAGContext]) -> Dict[str, Any]:
@@ -818,6 +878,10 @@ class RAGService:
             logger.debug(f"Using Vietnamese prompt (stream) for query: {query[:50]}...")
         else:
             system_prompt = SYSTEM_PROMPTS[self.template]
+        
+        # Always add format reminder to ensure line breaks in output
+        format_reminder = "\n\n[FORMAT: PHẢI xuống dòng (\\n) sau mỗi câu/ý quan trọng. Dùng - cho danh sách. **bold** cho từ khóa.]"
+        prompt = prompt + format_reminder
         
         yield from self.claude_service.invoke_stream(
             prompt=prompt,

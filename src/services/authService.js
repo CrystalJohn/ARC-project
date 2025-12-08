@@ -42,20 +42,25 @@ class AuthService {
       const user = await getCurrentUser()
       const session = await fetchAuthSession()
       const token = session.tokens?.idToken?.toString()
-      
-      // Extract groups from token
-      const groups = session.tokens?.idToken?.payload['cognito:groups'] || []
 
-      // Store token in localStorage
+      // Extract groups and display name from token payload
+      const payload = session.tokens?.idToken?.payload || {}
+      const groups = payload['cognito:groups'] || []
+      const displayName =
+        payload['preferred_username'] || payload['name'] || payload['email'] || email
+
+      // Store token and user info in localStorage
       localStorage.setItem('auth_token', token)
       localStorage.setItem('user_email', email)
       localStorage.setItem('user_groups', JSON.stringify(groups))
+      localStorage.setItem('user_display_name', displayName)
 
       return {
         user: {
           email: email,
           userId: user.userId,
           username: user.username,
+          displayName: displayName,
         },
         token,
         groups,
@@ -75,30 +80,41 @@ class AuthService {
       localStorage.removeItem('auth_token')
       localStorage.removeItem('user_email')
       localStorage.removeItem('user_groups')
+      localStorage.removeItem('user_display_name')
     } catch (error) {
       console.error('Logout error:', error)
       // Clear local storage even if signOut fails
       localStorage.removeItem('auth_token')
       localStorage.removeItem('user_email')
       localStorage.removeItem('user_groups')
+      localStorage.removeItem('user_display_name')
     }
   }
 
   /**
    * Get current authenticated user
-   * @returns {Promise<{email, userId, username, groups}>}
+   * @returns {Promise<{email, userId, username, displayName, groups}>}
    */
   async getCurrentUser() {
     try {
       const user = await getCurrentUser()
       const session = await fetchAuthSession()
-      const groups = session.tokens?.idToken?.payload['cognito:groups'] || []
+      const payload = session.tokens?.idToken?.payload || {}
+      const groups = payload['cognito:groups'] || []
       const email = localStorage.getItem('user_email')
+
+      // Get display name from token or localStorage
+      const displayName =
+        payload['preferred_username'] ||
+        payload['name'] ||
+        localStorage.getItem('user_display_name') ||
+        email
 
       return {
         email,
         userId: user.userId,
-        username: user.username,
+        username: displayName, // Use displayName as username for UI
+        displayName: displayName,
         groups,
       }
     } catch (error) {

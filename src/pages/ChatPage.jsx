@@ -4,6 +4,9 @@ import { authService } from '../services/authService'
 import { chatService } from '../services/chatService'
 import { Spinner } from '@heroui/react'
 import { motion, AnimatePresence } from 'framer-motion'
+import ReactMarkdown from 'react-markdown'
+import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
+import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism'
 import DocumentViewerModal from '../components/DocumentViewerModal'
 import Sidebar from '../components/Sidebar'
 import arcLogo from '../assets/Logo ARC-chatbot.png'
@@ -27,9 +30,10 @@ function ChatPage() {
   const [user, setUser] = useState(null)
   const [showAccountMenu, setShowAccountMenu] = useState(false)
   const [activeMenu, setActiveMenu] = useState('chat')
+  const [activeSubMenu, setActiveSubMenu] = useState('current')
   const [darkMode, setDarkMode] = useState(false)
   const messagesEndRef = useRef(null)
-  
+
   // History state
   const [conversations, setConversations] = useState([])
   const [loadingHistory, setLoadingHistory] = useState(false)
@@ -45,10 +49,10 @@ function ChatPage() {
 
   // Load history when switching to history tab
   useEffect(() => {
-    if (activeMenu === 'history') {
+    if (activeSubMenu === 'history') {
       loadConversations()
     }
-  }, [activeMenu])
+  }, [activeSubMenu])
 
   const loadUser = async () => {
     const currentUser = await authService.getCurrentUser()
@@ -75,17 +79,20 @@ function ChatPage() {
       const data = await chatService.getConversationHistory(convId)
       
       // Convert to message format
-      const loadedMessages = (data.messages || []).map(msg => ({
-        role: msg.role,
-        content: msg.content,
-        timestamp: msg.timestamp,
-        citations: msg.metadata?.citations || [],
-      }))
+      const loadedMessages = (data.messages || []).map(msg => {
+        console.log('Loading message:', msg.role, 'citations:', msg.citations)
+        return {
+          role: msg.role,
+          content: msg.content,
+          timestamp: msg.created_at || msg.timestamp,
+          citations: msg.citations || [],
+        }
+      })
       
       if (loadedMessages.length > 0) {
         setMessages(loadedMessages)
         setConversationId(convId)
-        setActiveMenu('chat')
+        setActiveSubMenu('current')
       }
     } catch (err) {
       console.error('Failed to load conversation:', err)
@@ -148,42 +155,91 @@ function ChatPage() {
     setLoading(true)
     setError(null)
 
+    // Add placeholder for streaming response
+    const streamingMessageId = Date.now()
+    setMessages((prev) => [
+      ...prev,
+      {
+        id: streamingMessageId,
+        role: 'assistant',
+        content: '',
+        isStreaming: true,
+        timestamp: new Date().toISOString(),
+      },
+    ])
+
     try {
-      const data = await chatService.sendChatMessage({
+      await chatService.sendChatMessageStream({
         query: userQuery,
         conversationId,
         userId: user?.username || 'anonymous',
         template: 'default',
         topK: 3,
         includeHistory: true,
+        onChunk: (chunk, fullText) => {
+          // Update streaming message with new content
+          setMessages((prev) =>
+            prev.map((msg) =>
+              msg.id === streamingMessageId ? { ...msg, content: fullText } : msg
+            )
+          )
+        },
+        onDone: (fullText, citations, convId) => {
+          console.log('Stream done - citations:', citations?.length || 0, 'convId:', convId)
+          
+          // Update conversation ID if new
+          if (convId && !conversationId) {
+            setConversationId(convId)
+          }
+
+          // Update message with citations from stream
+          setMessages((prev) =>
+            prev.map((msg) =>
+              msg.id === streamingMessageId
+                ? {
+                    ...msg,
+                    content: fullText,
+                    citations: citations || [],
+                    isStreaming: false,
+                  }
+                : msg
+            )
+          )
+          setLoading(false)
+        },
+        onError: (err) => {
+          console.error('Stream error:', err)
+          setError(err.message || 'Failed to get response. Please try again.')
+          setMessages((prev) =>
+            prev.map((msg) =>
+              msg.id === streamingMessageId
+                ? {
+                    ...msg,
+                    content: `Sorry, I encountered an error: ${err.message}. Please try again.`,
+                    isError: true,
+                    isStreaming: false,
+                  }
+                : msg
+            )
+          )
+          setLoading(false)
+        },
       })
-
-      if (data.conversation_id && !conversationId) {
-        setConversationId(data.conversation_id)
-      }
-
-      const assistantMessage = {
-        role: 'assistant',
-        content: data.answer,
-        citations: data.citations || [],
-        usage: data.usage,
-        model: data.model,
-        timestamp: data.timestamp,
-      }
-
-      setMessages((prev) => [...prev, assistantMessage])
     } catch (err) {
       console.error('Chat error:', err)
       setError(err.message || 'Failed to get response. Please try again.')
-
-      const errorMessage = {
-        role: 'assistant',
-        content: `Sorry, I encountered an error: ${err.message}. Please try again.`,
-        isError: true,
-        timestamp: new Date().toISOString(),
-      }
-      setMessages((prev) => [...prev, errorMessage])
-    } finally {
+      setMessages((prev) =>
+        prev.map((msg) =>
+          msg.id === streamingMessageId
+            ? {
+                ...msg,
+                content: `Sorry, I encountered an error: ${err.message}. Please try again.`,
+                isError: true,
+                isStreaming: false,
+              }
+            : msg
+        )
+      )
       setLoading(false)
     }
   }
@@ -204,6 +260,7 @@ function ChatPage() {
   }
 
   const handleNewChat = () => {
+    console.log('New Chat clicked - resetting conversation')
     setMessages([
       {
         role: 'assistant',
@@ -214,6 +271,8 @@ function ChatPage() {
     ])
     setConversationId(null)
     setError(null)
+    // Switch to Current Chat view
+    setActiveSubMenu('current')
   }
 
   const isAdmin = user?.groups?.includes('admin')
@@ -232,6 +291,8 @@ function ChatPage() {
       <Sidebar
         activeMenu={activeMenu}
         setActiveMenu={setActiveMenu}
+        activeSubMenu={activeSubMenu}
+        setActiveSubMenu={setActiveSubMenu}
         user={user}
         darkMode={darkMode}
         onNewChat={handleNewChat}
@@ -339,7 +400,7 @@ function ChatPage() {
         </div>
 
         {/* History Panel */}
-        {activeMenu === 'history' && (
+        {activeSubMenu === 'history' && (
           <div className={`flex-1 overflow-y-auto p-6 ${darkMode ? 'bg-gray-900' : 'bg-slate-100'}`}>
             <div className="max-w-3xl mx-auto">
               <h3 className={`text-lg font-semibold mb-4 ${darkMode ? 'text-white' : 'text-gray-800'}`}>
@@ -386,11 +447,11 @@ function ChatPage() {
                     <div className="flex items-start justify-between">
                       <div className="flex-1 min-w-0">
                         <p className={`font-medium truncate ${darkMode ? 'text-white' : 'text-gray-800'}`}>
-                          {conv.preview || conv.title || `Conversation ${conv.conversation_id?.slice(0, 8)}...`}
+                          {conv.title || conv.preview || `Conversation ${conv.conversation_id?.slice(0, 8)}...`}
                         </p>
                         <div className="flex items-center gap-3 mt-1">
                           <span className={`text-xs ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>
-                            {formatDate(conv.last_message_time || conv.updated_at)}
+                            {formatDate(conv.last_message_at || conv.last_message_time || conv.updated_at)}
                           </span>
                           <span className={`text-xs ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>
                             {conv.message_count || 0} messages
@@ -414,7 +475,7 @@ function ChatPage() {
         )}
 
         {/* Messages */}
-        {activeMenu === 'chat' && (
+        {activeSubMenu === 'current' && (
         <div
           className={`flex-1 overflow-y-auto p-6 space-y-6 ${darkMode ? 'bg-gray-900' : 'bg-slate-100'}`}
         >
@@ -457,9 +518,61 @@ function ChatPage() {
                               : 'bg-white text-gray-800'
                         } shadow-sm`}
                       >
-                        <p className="text-sm whitespace-pre-wrap leading-relaxed">{msg.content}</p>
+                        <div className="text-sm leading-relaxed prose prose-sm max-w-none dark:prose-invert">
+                          {msg.isStreaming ? (
+                            // Show plain text while streaming for better UX
+                            <p className="whitespace-pre-wrap">
+                              {msg.content}
+                              <span className="inline-block w-2 h-4 ml-1 bg-blue-500 animate-pulse rounded-sm" />
+                            </p>
+                          ) : (
+                            // Render markdown when streaming is complete
+                            <ReactMarkdown
+                              components={{
+                                code({ node, inline, className, children, ...props }) {
+                                  const match = /language-(\w+)/.exec(className || '')
+                                  return !inline && match ? (
+                                    <SyntaxHighlighter
+                                      style={oneDark}
+                                      language={match[1]}
+                                      PreTag="div"
+                                      className="rounded-lg text-xs"
+                                      {...props}
+                                    >
+                                      {String(children).replace(/\n$/, '')}
+                                    </SyntaxHighlighter>
+                                  ) : (
+                                    <code className="bg-gray-100 dark:bg-gray-700 px-1.5 py-0.5 rounded text-xs font-mono" {...props}>
+                                      {children}
+                                    </code>
+                                  )
+                                },
+                                h2: ({ children }) => (
+                                  <h2 className="text-base font-semibold text-gray-800 dark:text-gray-200 mt-4 mb-2">{children}</h2>
+                                ),
+                                h3: ({ children }) => (
+                                  <h3 className="text-sm font-medium text-gray-700 dark:text-gray-300 mt-3 mb-1">{children}</h3>
+                                ),
+                                ul: ({ children }) => (
+                                  <ul className="list-disc list-inside space-y-1 my-2">{children}</ul>
+                                ),
+                                ol: ({ children }) => (
+                                  <ol className="list-decimal list-inside space-y-1 my-2">{children}</ol>
+                                ),
+                                p: ({ children }) => (
+                                  <p className="my-2">{children}</p>
+                                ),
+                                strong: ({ children }) => (
+                                  <strong className="font-semibold text-gray-900 dark:text-gray-100">{children}</strong>
+                                ),
+                              }}
+                            >
+                              {msg.content}
+                            </ReactMarkdown>
+                          )}
+                        </div>
 
-                        {msg.citations && msg.citations.length > 0 && (
+                        {msg.citations && msg.citations.length > 0 && !msg.isStreaming && (
                           <div className="mt-4 pt-3 border-t border-gray-100 space-y-2">
                             <p className="text-xs text-gray-500 mb-2">📚 Sources:</p>
                             {msg.citations.map((citation) => {
@@ -474,7 +587,7 @@ function ChatPage() {
                                   className="p-3 bg-blue-50 border border-blue-100 rounded-lg cursor-pointer hover:bg-blue-100 transition-colors"
                                 >
                                   <p className="text-xs font-medium text-blue-700 mb-1">
-                                    {citation.doc_id?.slice(0, 8) || 'Document'}...
+                                    {citation.filename || citation.doc_id?.slice(0, 8) || 'Document'}
                                   </p>
                                   <p className="text-xs text-blue-600 line-clamp-2 mb-2">
                                     {citation.text_snippet}
@@ -519,7 +632,8 @@ function ChatPage() {
             ))}
           </AnimatePresence>
 
-          {loading && (
+          {/* Only show Thinking indicator if loading but no streaming message yet */}
+          {loading && !messages.some(m => m.isStreaming) && (
             <motion.div
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}

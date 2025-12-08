@@ -104,6 +104,7 @@ class CitationResponse(BaseModel):
     page: int
     text_snippet: str
     score: float
+    filename: str = ""  # Original filename for display
 
 
 class UsageResponse(BaseModel):
@@ -273,6 +274,7 @@ def _convert_rag_response(
                 page=c.page,
                 text_snippet=c.text_snippet,
                 score=c.score,
+                filename=getattr(c, 'filename', ''),
             )
             for c in rag_response.citations
         ],
@@ -558,15 +560,51 @@ async def chat_stream(
             logger.warning(f"Failed to save user message: {e}")
         
         # Retrieve contexts
-        contexts = rag_service.retrieve_contexts(
-            query=request.query,
-            top_k=request.top_k or 5,
-            search_filter=search_filter,
-        )
+        try:
+            contexts = rag_service.retrieve_contexts(
+                query=request.query,
+                top_k=request.top_k or 5,
+                search_filter=search_filter,
+            )
+        except Exception as e:
+            logger.error(f"Failed to retrieve contexts: {e}")
+            raise HTTPException(status_code=503, detail=f"Search service unavailable: {str(e)[:50]}")
+        
+        # Build citations directly from contexts
+        logger.info(f"Retrieved {len(contexts)} contexts for citations")
+        
+        # Get filenames for doc_ids
+        from app.services.document_status_manager import DocumentStatusManager
+        status_manager = DocumentStatusManager()
+        filename_map = {}
+        doc_ids = list(set(ctx.doc_id for ctx in contexts))
+        for doc_id in doc_ids:
+            try:
+                doc = status_manager.get_document(doc_id)
+                if doc:
+                    filename_map[doc_id] = doc.get("filename", "")
+            except Exception:
+                pass
+        
+        citations_data = []
+        for i, ctx in enumerate(contexts, 1):
+            # Score is already 0-100 percentage from Qdrant, don't multiply
+            score = ctx.score if ctx.score <= 100 else ctx.score / 100
+            citations_data.append({
+                "id": i,
+                "doc_id": ctx.doc_id,
+                "page": ctx.page,
+                "text_snippet": ctx.text[:200] + "..." if len(ctx.text) > 200 else ctx.text,
+                "score": round(score, 1),
+                "filename": filename_map.get(ctx.doc_id, ""),
+            })
+        logger.info(f"Built {len(citations_data)} citations from contexts")
         
         # Generate streaming response with history saving
         async def generate():
+            import json
             full_answer = ""
+            sent_done = False
             try:
                 for chunk in rag_service.generate_answer_stream(
                     query=request.query,
@@ -575,9 +613,23 @@ async def chat_stream(
                 ):
                     if chunk.text:
                         full_answer += chunk.text
-                        yield f"data: {chunk.text}\n\n"
+                        # Encode newlines to preserve them in SSE
+                        encoded_text = chunk.text.replace('\n', '\\n')
+                        yield f"data: {encoded_text}\n\n"
                     if chunk.is_final:
+                        # Send citations as JSON before [DONE]
+                        logger.info(f"Stream complete, sending {len(citations_data)} citations")
+                        yield f"data: [CITATIONS]{json.dumps(citations_data)}\n\n"
+                        yield f"data: [CONV_ID]{conversation_id}\n\n"
                         yield "data: [DONE]\n\n"
+                        sent_done = True
+                
+                # Fallback: send citations if not sent yet
+                if not sent_done:
+                    logger.info(f"Fallback: sending {len(citations_data)} citations after loop")
+                    yield f"data: [CITATIONS]{json.dumps(citations_data)}\n\n"
+                    yield f"data: [CONV_ID]{conversation_id}\n\n"
+                    yield "data: [DONE]\n\n"
                 
                 # ✅ Save assistant message after streaming completes
                 if full_answer:
@@ -586,6 +638,7 @@ async def chat_stream(
                             conversation_id=conversation_id,
                             content=full_answer,
                             user_id=user_id,
+                            citations=citations_data,
                         )
                     except Exception as e:
                         logger.warning(f"Failed to save assistant message: {e}")
@@ -608,9 +661,16 @@ async def chat_stream(
         raise
     except Exception as e:
         logger.error(f"Stream chat error: {e}", exc_info=True)
+        # Check if it's a throttling error
+        error_msg = str(e).lower()
+        if "throttl" in error_msg or "too many" in error_msg or "rate" in error_msg:
+            raise HTTPException(
+                status_code=429,
+                detail="Service is busy. Please wait a moment and try again."
+            )
         raise HTTPException(
             status_code=500,
-            detail="An error occurred setting up the stream. Please try again."
+            detail=f"An error occurred: {str(e)[:100]}"
         )
 
 
@@ -632,6 +692,46 @@ async def chat_health():
             "status": "unhealthy",
             "error": str(e),
         }
+
+
+@router.get("/document/{doc_id}")
+async def get_document_info(
+    doc_id: str,
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """
+    Get document info for citation display.
+    
+    REQUIRES: Authentication (any logged-in user)
+    
+    This endpoint allows regular users to view document metadata
+    for citations without requiring admin access.
+    """
+    from app.services.document_status_manager import DocumentStatusManager
+    
+    try:
+        status_manager = DocumentStatusManager()
+        doc = status_manager.get_document(doc_id)
+        
+        if not doc:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Document {doc_id} not found"
+            )
+        
+        return {
+            "doc_id": doc.get("doc_id", ""),
+            "filename": doc.get("filename", ""),
+            "status": doc.get("status", ""),
+            "uploaded_at": doc.get("uploaded_at", ""),
+            "page_count": doc.get("page_count"),
+            "chunk_count": doc.get("chunk_count"),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get document info: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/rate-limit")
@@ -701,16 +801,19 @@ class ConversationHistoryResponse(BaseModel):
 
 @router.get("/history", response_model=ConversationListResponse)
 async def list_conversations(
-    user_id: str = Query("anonymous", description="User ID"),
     limit: int = Query(20, ge=1, le=100, description="Max conversations to return"),
+    current_user: CurrentUser = Depends(get_current_user),  # ✅ Require authentication
 ):
     """
-    List conversations for a user.
+    List conversations for the authenticated user.
     
-    Returns a list of conversations with their last message preview.
+    REQUIRES: Authentication (valid Cognito token)
+    Returns only conversations belonging to the current user.
     """
     try:
         history_manager = get_chat_history_manager()
+        user_id = current_user.user_id or current_user.email or "anonymous"
+        
         result = history_manager.list_conversations(
             user_id=user_id,
             limit=limit,
@@ -729,14 +832,29 @@ async def list_conversations(
 async def get_conversation_history(
     conversation_id: str,
     limit: int = Query(50, ge=1, le=200, description="Max messages to return"),
+    current_user: CurrentUser = Depends(get_current_user),  # ✅ Require authentication
 ):
     """
     Get messages for a specific conversation.
     
+    REQUIRES: Authentication (valid Cognito token)
+    Only the owner of the conversation can view it.
     Returns messages in chronological order (oldest first).
     """
     try:
         history_manager = get_chat_history_manager()
+        user_id = current_user.user_id or current_user.email or "anonymous"
+        
+        # ✅ Verify ownership: Check if conversation belongs to current user
+        conversations = history_manager.list_conversations(user_id=user_id, limit=100)
+        conversation_ids = [c.get("conversation_id") for c in conversations.get("conversations", [])]
+        
+        if conversation_id not in conversation_ids:
+            raise HTTPException(
+                status_code=403,
+                detail="You don't have permission to view this conversation."
+            )
+        
         messages = history_manager.get_conversation_history(
             conversation_id=conversation_id,
             limit=limit,
@@ -748,6 +866,8 @@ async def get_conversation_history(
             messages=[msg.to_dict() for msg in messages],
             total=len(messages),
         )
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to get conversation history: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
@@ -756,13 +876,28 @@ async def get_conversation_history(
 @router.delete("/history/{conversation_id}")
 async def delete_conversation(
     conversation_id: str,
-    user_id: str = Query("anonymous", description="User ID"),
+    current_user: CurrentUser = Depends(get_current_user),  # ✅ Require authentication
 ):
     """
     Delete a conversation and all its messages.
+    
+    REQUIRES: Authentication (valid Cognito token)
+    Only the owner of the conversation can delete it.
     """
     try:
         history_manager = get_chat_history_manager()
+        user_id = current_user.user_id or current_user.email or "anonymous"
+        
+        # ✅ Verify ownership: Check if conversation belongs to current user
+        conversations = history_manager.list_conversations(user_id=user_id, limit=100)
+        conversation_ids = [c.get("conversation_id") for c in conversations.get("conversations", [])]
+        
+        if conversation_id not in conversation_ids:
+            raise HTTPException(
+                status_code=403,
+                detail="You don't have permission to delete this conversation. You can only delete your own conversations."
+            )
+        
         deleted = history_manager.delete_conversation(
             conversation_id=conversation_id,
             user_id=user_id,
@@ -773,6 +908,8 @@ async def delete_conversation(
             "deleted_messages": deleted,
             "status": "deleted",
         }
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to delete conversation: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))

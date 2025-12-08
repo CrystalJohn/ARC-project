@@ -246,59 +246,84 @@ class DocumentStatusManager:
         self,
         status: Optional[DocumentStatus] = None,
         page_size: int = 20,
-        last_evaluated_key: Optional[dict] = None
+        page: int = 1
     ) -> dict:
         """
-        List documents with proper DynamoDB cursor-based pagination.
+        List documents with in-memory pagination and proper sorting.
         
-        Uses DynamoDB's native pagination (LastEvaluatedKey) instead of
-        fetching all and paginating in memory.
+        Fetches all documents, sorts by uploaded_at descending, then paginates.
+        Suitable for datasets < 1000 documents.
         
         Args:
             status: Filter by status (optional)
             page_size: Items per page (default 20)
-            last_evaluated_key: Cursor for next page (from previous response)
+            page: Page number (1-indexed, default 1)
             
         Returns:
-            dict: {items: [...], last_evaluated_key: ..., has_more: bool}
+            dict: {items: [...], total: int, has_more: bool}
             
         Requirements: 11.1, 11.2
         """
-        if status:
-            # Use GSI for status filtering - efficient query
-            params = {
-                "TableName": self.table_name,
-                "IndexName": "status-index",
-                "KeyConditionExpression": "#status = :status",
-                "ExpressionAttributeNames": {"#status": "status"},
-                "ExpressionAttributeValues": {":status": {"S": status.value}},
-                "Limit": page_size,
-                "ScanIndexForward": False  # Descending by uploaded_at
-            }
-        else:
-            # Scan with limit - still paginated properly
-            params = {
-                "TableName": self.table_name,
-                "FilterExpression": "sk = :sk",
-                "ExpressionAttributeValues": {":sk": {"S": "METADATA"}},
-                "Limit": page_size,
-            }
+        # Fetch all documents (with pagination for large datasets)
+        all_items = []
+        last_key = None
         
-        if last_evaluated_key:
-            params["ExclusiveStartKey"] = last_evaluated_key
+        while True:
+            if status:
+                # Use GSI for status filtering
+                params = {
+                    "TableName": self.table_name,
+                    "IndexName": "status-index",
+                    "KeyConditionExpression": "#status = :status",
+                    "ExpressionAttributeNames": {"#status": "status"},
+                    "ExpressionAttributeValues": {":status": {"S": status.value}},
+                }
+            else:
+                # Scan all METADATA records
+                params = {
+                    "TableName": self.table_name,
+                    "FilterExpression": "sk = :sk",
+                    "ExpressionAttributeValues": {":sk": {"S": "METADATA"}},
+                }
+            
+            if last_key:
+                params["ExclusiveStartKey"] = last_key
+            
+            if status:
+                response = self._client.query(**params)
+            else:
+                response = self._client.scan(**params)
+            
+            items = [self._parse_item(item) for item in response.get("Items", [])]
+            all_items.extend(items)
+            
+            last_key = response.get("LastEvaluatedKey")
+            if not last_key:
+                break
         
-        if status:
-            response = self._client.query(**params)
-        else:
-            response = self._client.scan(**params)
+        # Sort by uploaded_at descending (newest first)
+        all_items.sort(key=lambda x: x.get("uploaded_at", ""), reverse=True)
         
-        items = [self._parse_item(item) for item in response.get("Items", [])]
-        next_key = response.get("LastEvaluatedKey")
+        # Calculate stats from ALL items (before filtering by status)
+        stats = {
+            "total": len(all_items),
+            "completed": sum(1 for d in all_items if d.get("status") == "EMBEDDING_DONE"),
+            "processing": sum(1 for d in all_items if d.get("status") == "IDP_RUNNING"),
+            "failed": sum(1 for d in all_items if d.get("status") == "FAILED"),
+            "uploaded": sum(1 for d in all_items if d.get("status") == "UPLOADED"),
+        }
+        
+        # Calculate pagination
+        total = len(all_items)
+        start_idx = (page - 1) * page_size
+        end_idx = start_idx + page_size
+        page_items = all_items[start_idx:end_idx]
         
         return {
-            "items": items,
-            "last_evaluated_key": next_key,
-            "has_more": next_key is not None,
+            "items": page_items,
+            "total": total,
+            "has_more": end_idx < total,
+            "stats": stats,
         }
 
     def _parse_item(self, item: dict) -> dict:
