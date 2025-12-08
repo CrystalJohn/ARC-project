@@ -60,10 +60,10 @@ export async function sendChatMessage({
  * @param {string} conversationId - Conversation ID
  * @returns {Promise<Object>} Conversation history
  */
-export async function getConversationHistory(conversationId) {
+export async function getConversationHistory(conversationId, limit = 100) {
   const token = await authService.getAccessToken()
   
-  const response = await fetch(`${API_URL}/api/chat/history/${conversationId}`, {
+  const response = await fetch(`${API_URL}/api/chat/history/${conversationId}?limit=${limit}`, {
     method: 'GET',
     headers: {
       'Authorization': `Bearer ${token}`
@@ -83,12 +83,12 @@ export async function getConversationHistory(conversationId) {
  * @param {number} [pageSize] - Page size
  * @returns {Promise<Object>} List of conversations
  */
-export async function listConversations(page = 1, pageSize = 20) {
+export async function listConversations(limit = 50) {
   const token = await authService.getAccessToken()
   const user = await authService.getCurrentUser()
   
   const response = await fetch(
-    `${API_URL}/api/chat/history?user_id=${user?.username || 'anonymous'}&page=${page}&page_size=${pageSize}`,
+    `${API_URL}/api/chat/history?user_id=${user?.userId || user?.username || 'anonymous'}&limit=${limit}`,
     {
       method: 'GET',
       headers: {
