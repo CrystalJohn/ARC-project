@@ -22,7 +22,7 @@ from fastapi import APIRouter, HTTPException, Query, Response, Depends
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from app.services.rag_service import RAGService, PromptTemplate, RAGResponse
+from app.services.rag_service import RAGService, PromptTemplate, RAGResponse, is_greeting, GREETING_RESPONSES
 from app.services.qdrant_client import SearchFilter
 from app.services.chat_history_manager import (
     ChatHistoryManager,
@@ -558,6 +558,42 @@ async def chat_stream(
             )
         except Exception as e:
             logger.warning(f"Failed to save user message: {e}")
+        
+        # ✅ Check for greeting - respond friendly without RAG search
+        greeting_detected, greeting_lang = is_greeting(request.query)
+        if greeting_detected:
+            logger.info(f"Greeting detected in stream (lang={greeting_lang}): {request.query}")
+            greeting_response = GREETING_RESPONSES.get(greeting_lang, GREETING_RESPONSES["en"])
+            
+            async def greeting_stream():
+                import json
+                # Encode newlines for SSE
+                encoded_text = greeting_response.replace('\n', '\\n')
+                yield f"data: {encoded_text}\n\n"
+                yield f"data: [CITATIONS]{json.dumps([])}\n\n"  # Empty citations
+                yield f"data: [CONV_ID]{conversation_id}\n\n"
+                yield "data: [DONE]\n\n"
+                
+                # Save greeting response to history
+                try:
+                    history_manager.save_assistant_message(
+                        conversation_id=conversation_id,
+                        content=greeting_response,
+                        user_id=user_id,
+                        citations=[],
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to save greeting response: {e}")
+            
+            return StreamingResponse(
+                greeting_stream(),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "Connection": "keep-alive",
+                    "X-Conversation-ID": conversation_id,
+                }
+            )
         
         # Retrieve contexts
         try:

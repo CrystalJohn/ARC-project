@@ -55,6 +55,98 @@ class PromptTemplate(Enum):
 # Vietnamese character set for language detection
 VIETNAMESE_CHARS = set('àáảãạăằắẳẵặâầấẩẫậèéẻẽẹêềếểễệìíỉĩịòóỏõọôồốổỗộơờớởỡợùúủũụưừứửữựỳýỷỹỵđ')
 
+# Greeting patterns for detection
+GREETING_PATTERNS = {
+    "vi": [
+        "xin chào", "chào bạn", "chào", "hello", "hi", "hey",
+        "xin hỏi", "cho mình hỏi", "cho tôi hỏi", "mình muốn hỏi",
+        "bạn ơi", "alo", "chào buổi sáng", "chào buổi chiều", "chào buổi tối"
+    ],
+    "en": [
+        "hello", "hi", "hey", "good morning", "good afternoon", "good evening",
+        "greetings", "howdy", "what's up", "sup"
+    ]
+}
+
+# Greeting responses - friendly and informative
+GREETING_RESPONSES = {
+    "vi": """Xin chào! 👋 Tôi là **ARC Chatbot** - trợ lý nghiên cứu tài liệu của bạn.
+
+Tôi có thể giúp bạn:
+- 📚 **Tìm kiếm thông tin** trong các tài liệu đã upload
+- 📝 **Trả lời câu hỏi** dựa trên nội dung tài liệu
+- 🔍 **Trích dẫn nguồn** chính xác với số trang
+
+Bạn muốn hỏi về vấn đề gì trong tài liệu? Hãy đặt câu hỏi cụ thể để tôi hỗ trợ tốt nhất nhé! 😊""",
+
+    "en": """Hello! 👋 I'm **ARC Chatbot** - your research document assistant.
+
+I can help you:
+- 📚 **Search information** in uploaded documents
+- 📝 **Answer questions** based on document content
+- 🔍 **Cite sources** accurately with page numbers
+
+What would you like to know about your documents? Feel free to ask specific questions! 😊"""
+}
+
+
+def is_greeting(text: str) -> tuple[bool, str]:
+    """
+    Check if text is a greeting message.
+    
+    Args:
+        text: Input text to check
+        
+    Returns:
+        Tuple of (is_greeting, detected_language)
+    """
+    if not text:
+        return False, "en"
+    
+    text_lower = text.lower().strip()
+    
+    # Remove punctuation for matching
+    text_clean = ''.join(c for c in text_lower if c.isalnum() or c.isspace())
+    
+    # Detect language first based on Vietnamese characters
+    has_vietnamese = any(c in text_lower for c in VIETNAMESE_CHARS)
+    
+    # Vietnamese-specific greetings (only in Vietnamese)
+    vi_only_greetings = ["xin chào", "chào bạn", "chào", "xin hỏi", "cho mình hỏi", 
+                         "cho tôi hỏi", "mình muốn hỏi", "bạn ơi", "alo",
+                         "chào buổi sáng", "chào buổi chiều", "chào buổi tối"]
+    
+    for pattern in vi_only_greetings:
+        if pattern in text_clean or text_clean == pattern:
+            return True, "vi"
+    
+    # English-specific greetings
+    en_only_greetings = ["good morning", "good afternoon", "good evening",
+                         "greetings", "howdy", "what's up", "sup"]
+    
+    for pattern in en_only_greetings:
+        if pattern in text_clean or text_clean == pattern:
+            return True, "en"
+    
+    # Universal greetings - detect language based on context
+    universal_greetings = ["hello", "hi", "hey"]
+    
+    for pattern in universal_greetings:
+        if text_clean == pattern or text_clean.startswith(pattern + " "):
+            # If has Vietnamese chars elsewhere, respond in Vietnamese
+            if has_vietnamese:
+                return True, "vi"
+            # Default to Vietnamese for this Vietnamese-focused app
+            return True, "vi"
+    
+    # Short messages that might be greetings
+    if len(text_clean.split()) <= 2:
+        short_greetings = ["hi", "hello", "hey"]
+        if text_clean in short_greetings:
+            return True, "vi"  # Default to Vietnamese
+    
+    return False, "en"
+
 
 def detect_language(text: str) -> str:
     """
@@ -1003,6 +1095,7 @@ Preserve the format, citations [1], [2], and important technical terms."""
         - Only returns results that are truly relevant to the query
         - Bilingual support with conversation-aware language detection
         - Translation request handling (uses history instead of RAG search)
+        - Greeting detection for friendly responses
         
         Args:
             query: User query
@@ -1018,7 +1111,32 @@ Preserve the format, citations [1], [2], and important technical terms."""
         Returns:
             RAGResponse or Generator[StreamChunk] if streaming
         """
-        # ✅ Check for translation request FIRST
+        # ✅ Check for greeting FIRST - respond friendly without RAG search
+        greeting_detected, greeting_lang = is_greeting(query)
+        if greeting_detected:
+            logger.info(f"Greeting detected (lang={greeting_lang}): {query}")
+            greeting_response = GREETING_RESPONSES.get(greeting_lang, GREETING_RESPONSES["en"])
+            
+            # For streaming, yield the greeting response
+            if stream:
+                def greeting_stream():
+                    yield StreamChunk(
+                        text=greeting_response,
+                        is_final=True,
+                        usage=TokenUsage(input_tokens=0, output_tokens=0),
+                    )
+                return greeting_stream()
+            
+            return RAGResponse(
+                answer=greeting_response,
+                citations=[],  # No citations for greetings
+                usage=TokenUsage(input_tokens=0, output_tokens=0),
+                model=self.claude_service.model_alias,
+                contexts_used=0,
+                query=query,
+            )
+        
+        # ✅ Check for translation request
         lang_context = get_language_context(
             query=query,
             history=history,
