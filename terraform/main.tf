@@ -89,15 +89,19 @@ module "sqs" {
   s3_bucket_arn = module.s3.documents_bucket_arn
 }
 
-# Amplify Module
-# TODO: Uncomment after setting up Git repository
-# module "amplify" {
-#   source = "./modules/amplify"
-#   
-#   project_name       = var.project_name
-#   environment        = var.environment
-#   repository_url     = "https://gitlab.com/academy-research-chatbot-arc/ARC-project.git"
-#   cognito_pool_id    = module.cognito.user_pool_id
-#   cognito_client_id  = module.cognito.app_client_id
-#   api_url            = module.ec2.alb_dns_name
-# }
+# CI/CD Module - GitLab + CodePipeline + CodeBuild + CodeDeploy
+module "cicd" {
+  source = "./modules/cicd"
+  
+  project_name               = var.project_name
+  environment                = var.environment
+  aws_region                 = var.aws_region
+  gitlab_repository          = "academy-research-chatbot-arc/ARC-project"
+  gitlab_branch              = "tech-lead"
+  frontend_bucket_name       = module.s3.frontend_bucket_name
+  frontend_bucket_arn        = module.s3.frontend_bucket_arn
+  cloudfront_distribution_id = ""  # Add after CloudFront is created
+  api_url                    = "https://${module.ec2.alb_dns_name}"
+  cognito_user_pool_id       = module.cognito.user_pool_id
+  cognito_client_id          = module.cognito.app_client_id
+}

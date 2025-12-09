@@ -104,3 +104,40 @@ output "sqs_dlq_url" {
   description = "URL of the dead letter queue"
   value       = module.sqs.dlq_url
 }
+
+# CI/CD Outputs
+output "pipeline_name" {
+  description = "Name of the CodePipeline"
+  value       = module.cicd.pipeline_name
+}
+
+output "pipeline_arn" {
+  description = "ARN of the CodePipeline"
+  value       = module.cicd.pipeline_arn
+}
+
+output "artifacts_bucket" {
+  description = "S3 bucket for pipeline artifacts"
+  value       = module.cicd.artifacts_bucket
+}
+
+output "gitlab_connection_arn" {
+  description = "CodeStar GitLab connection ARN (needs manual approval)"
+  value       = module.cicd.gitlab_connection_arn
+}
+
+output "gitlab_connection_status" {
+  description = "GitLab connection status"
+  value       = module.cicd.gitlab_connection_status
+}
+
+# Frontend Hosting Outputs
+output "frontend_bucket_name" {
+  description = "Name of the frontend S3 bucket"
+  value       = module.s3.frontend_bucket_name
+}
+
+output "frontend_website_endpoint" {
+  description = "Frontend website endpoint"
+  value       = module.s3.frontend_bucket_website_endpoint
+}
